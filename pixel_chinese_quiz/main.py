@@ -80,12 +80,47 @@ FONT_NAMES = [
 ]
 
 
+_NOTDEF = {}
+
+
+def _notdef(font):
+    """폰트에 없는 글자를 그릴 때 나오는 □ 모양 (비교용)."""
+    if font not in _NOTDEF:
+        img = font.render("\uffff", False, (255, 255, 255), (0, 0, 0))
+        _NOTDEF[font] = (img.get_size(), pygame.image.tostring(img, "RGB"))
+    return _NOTDEF[font]
+
+
 def _covers(font, text):
+    """폰트가 text 의 모든 글자를 가지고 있는지.
+
+    pygame/SDL_ttf 버전에 따라 metrics() 가 없는 글자도 OK 로 돌려주므로,
+    실제로 그려서 □(notdef) 모양과 같은지도 비교한다.
+    """
     try:
-        return all(m is not None for m in font.metrics(text))
+        if any(m is None for m in font.metrics(text)):
+            return False
+        nd = _notdef(font)
+        for ch in text:
+            if ch.isspace():
+                continue
+            img = font.render(ch, False, (255, 255, 255), (0, 0, 0))
+            if (img.get_size(), pygame.image.tostring(img, "RGB")) == nd:
+                return False
+        return True
     except Exception:
         return False
 
+
+def _fc_list(lang):
+    """Linux(라즈베리파이 등): fontconfig 로 해당 언어 폰트 파일 찾기."""
+    try:
+        import subprocess
+        out = subprocess.run(["fc-list", f":lang={lang}", "file"], capture_output=True,
+                             text=True, timeout=5).stdout
+    except Exception:
+        return []
+    return sorted(line.split(":")[0].strip() for line in out.splitlines() if line.strip())
 
 # 어떤 폰트에도 없는 기호는 ASCII 로 바꿔서 □(두부) 대신 보이게
 SYMBOL_FALLBACK = {"▶": ">", "◀": "<", "★": "*", "☆": "-", "●": "*", "·": "-",
@@ -96,21 +131,38 @@ def load_fonts(size=16):
     """쓸 수 있는 폰트 목록 (assets 의 픽셀 폰트 → 시스템 CJK 폰트 순)."""
     paths = [p for p in FONT_CANDIDATES if os.path.exists(p)]
     for name in FONT_NAMES:
-        p = pygame.font.match_font(name)
+        try:
+            p = pygame.font.match_font(name)
+        except Exception:
+            p = None
         if p:
             paths.append(p)
-    fonts, seen = [], set()
+    paths += _fc_list("ko") + _fc_list("zh-cn")
+    fonts, names, seen = [], [], set()
     for p in paths:
         if p in seen:
             continue
         seen.add(p)
         try:
-            fonts.append(pygame.font.Font(p, size))
-        except Exception:
+            f = pygame.font.Font(p, size)
+        except Exception as e:
+            print(f"[폰트] 로드 실패 {p}: {e}")
             continue
+        # 한글이나 한자 중 하나라도 실제로 있는 폰트만 사용
+        if _covers(f, "가") or _covers(f, "你"):
+            fonts.append(f)
+            names.append(p)
         if len(fonts) >= 6:
             break
     fonts.append(pygame.font.Font(None, size))
+    names.append("pygame 기본 폰트")
+    ko = next((n for f, n in zip(fonts, names) if _covers(f, "가나다")), None)
+    zh = next((n for f, n in zip(fonts, names) if _covers(f, "你好谢")), None)
+    print(f"[폰트] 한글: {ko or '없음!'}")
+    print(f"[폰트] 한자: {zh or '없음!'}")
+    if not (ko and zh):
+        print("[폰트] 글자가 □로 보이면: git pull 로 assets/unifont.otf 를 받거나 "
+              "sudo apt install fonts-unifont fonts-noto-cjk")
     return fonts
 
 
