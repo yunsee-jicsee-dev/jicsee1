@@ -87,44 +87,83 @@ def _covers(font, text):
         return False
 
 
+# 어떤 폰트에도 없는 기호는 ASCII 로 바꿔서 □(두부) 대신 보이게
+SYMBOL_FALLBACK = {"▶": ">", "◀": "<", "★": "*", "☆": "-", "●": "*", "·": "-",
+                   "↑": "^", "↓": "v", "←": "<", "→": ">", "↔": "<>", "…": "..."}
+
+
 def load_fonts(size=16):
-    """한글 UI 용 / 중국어 용 폰트를 각각 찾는다 (한 폰트가 둘 다 되면 같이 씀)."""
+    """쓸 수 있는 폰트 목록 (assets 의 픽셀 폰트 → 시스템 CJK 폰트 순)."""
     paths = [p for p in FONT_CANDIDATES if os.path.exists(p)]
     for name in FONT_NAMES:
         p = pygame.font.match_font(name)
         if p:
             paths.append(p)
-    ko = zh = None
+    fonts, seen = [], set()
     for p in paths:
+        if p in seen:
+            continue
+        seen.add(p)
         try:
-            f = pygame.font.Font(p, size)
+            fonts.append(pygame.font.Font(p, size))
         except Exception:
             continue
-        if ko is None and _covers(f, "가힣말하기"):
-            ko = f
-        if zh is None and _covers(f, "你好谢饺"):
-            zh = f
-        if ko and zh:
+        if len(fonts) >= 6:
             break
-    fallback = pygame.font.Font(None, size)
-    return ko or fallback, zh or ko or fallback
+    fonts.append(pygame.font.Font(None, size))
+    return fonts
 
 
 class Text:
+    """글자마다 그 글자를 가진 폰트를 골라 이어 붙여 그린다 (빠진 글자 □ 방지)."""
+
     def __init__(self):
-        self.ko, self.zh = load_fonts(16)
+        self.fonts = load_fonts(16)
+        self.zh_first = next((f for f in self.fonts if _covers(f, "你好谢饺")), self.fonts[0])
         self.cache = {}
+        self.char_font = {}
+
+    def _font_for(self, ch, zh):
+        key = (ch, zh)
+        if key not in self.char_font:
+            order = ([self.zh_first] if zh else []) + self.fonts
+            self.char_font[key] = next((f for f in order if _covers(f, ch)), None)
+        return self.char_font[key]
+
+    def _runs(self, s, zh):
+        runs = []  # [(font, text)]
+        for ch in s:
+            f = self._font_for(ch, zh)
+            if f is None:
+                ch = SYMBOL_FALLBACK.get(ch, "?")
+                f = self.fonts[-1]
+            if runs and runs[-1][0] is f:
+                runs[-1][1] += ch
+            else:
+                runs.append([f, ch])
+        return runs
+
+    def _plain(self, s, color, zh):
+        parts = [f.render(t, False, color) for f, t in self._runs(s, zh)]  # 안티앨리어싱 OFF → 도트 느낌
+        if not parts:
+            return pygame.Surface((1, 1), pygame.SRCALPHA)
+        h = max(p.get_height() for p in parts)
+        out = pygame.Surface((sum(p.get_width() for p in parts), h), pygame.SRCALPHA)
+        x = 0
+        for p in parts:
+            out.blit(p, (x, h - p.get_height()))
+            x += p.get_width()
+        return out
 
     def render(self, s, color=WHITE, scale=1, zh=False, shadow=True):
         key = (s, color, scale, zh, shadow)
         if key in self.cache:
             return self.cache[key]
-        font = self.zh if zh else self.ko
-        img = font.render(s, False, color)  # 안티앨리어싱 OFF → 도트 느낌
+        img = self._plain(s, color, zh)
         if scale != 1:
             img = pygame.transform.scale(img, (img.get_width() * scale, img.get_height() * scale))
         if shadow:
-            sh = font.render(s, False, (10, 8, 16))
+            sh = self._plain(s, (10, 8, 16), zh)
             if scale != 1:
                 sh = pygame.transform.scale(sh, img.get_size())
             out = pygame.Surface((img.get_width() + scale, img.get_height() + scale), pygame.SRCALPHA)

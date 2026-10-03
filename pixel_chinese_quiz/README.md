@@ -56,5 +56,5 @@ python main.py --vosk-model ./vosk-model-small-cn-0.22
 
 ## 폰트
 
-한글과 한자가 모두 나오는 폰트를 자동으로 찾습니다 (Unifont, Noto Sans CJK, 맑은 고딕 + Microsoft YaHei 등).
-더 예쁜 도트 느낌을 원하면 [Fusion Pixel Font](https://github.com/TakWolf/fusion-pixel-font)처럼 한글·중국어를 지원하는 픽셀 폰트의 `.ttf/.otf`를 `assets/` 폴더에 넣으면 우선 사용합니다.
+`assets/unifont.otf`(GNU Unifont, 도트 폰트)가 같이 들어 있어서 한글·한자·병음·기호가 어떤 OS에서도 □ 없이 나옵니다.
+글자마다 그 글자가 있는 폰트를 골라 그리기 때문에, 다른 픽셀 폰트(예: [Fusion Pixel Font](https://github.com/TakWolf/fusion-pixel-font))를 `assets/`에 넣으면 그 폰트를 우선 쓰고 빠진 글자만 Unifont로 채웁니다.

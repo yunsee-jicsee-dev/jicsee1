@@ -1,0 +1,3 @@
+assets/unifont.otf — GNU Unifont 15.1.01 (https://unifoundry.com/unifont/)
+License: GNU GPL v2 or later, with the GNU font embedding exception
+(upstream also offers it under the SIL Open Font License 1.1).
