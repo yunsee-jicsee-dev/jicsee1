@@ -1,0 +1,7 @@
+pygame>=2.1
+numpy
+sounddevice
+SpeechRecognition
+pypinyin
+# 선택: 오프라인 음성인식 (--vosk-model 옵션 사용 시)
+# vosk

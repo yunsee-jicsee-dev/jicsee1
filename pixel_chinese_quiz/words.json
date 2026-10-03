@@ -1,0 +1,71 @@
+{
+  "lessons": [
+    {
+      "title": "1과 · 인사",
+      "words": [
+        {"hanzi": "你好", "pinyin": "nǐ hǎo", "meaning": "안녕하세요"},
+        {"hanzi": "谢谢", "pinyin": "xiè xie", "meaning": "감사합니다"},
+        {"hanzi": "再见", "pinyin": "zài jiàn", "meaning": "안녕히 가세요"},
+        {"hanzi": "对不起", "pinyin": "duì bu qǐ", "meaning": "미안합니다"},
+        {"hanzi": "没关系", "pinyin": "méi guān xi", "meaning": "괜찮아요"},
+        {"hanzi": "早上好", "pinyin": "zǎo shang hǎo", "meaning": "좋은 아침이에요"},
+        {"hanzi": "晚安", "pinyin": "wǎn ān", "meaning": "잘 자요"},
+        {"hanzi": "不客气", "pinyin": "bú kè qi", "meaning": "천만에요"}
+      ]
+    },
+    {
+      "title": "2과 · 숫자",
+      "words": [
+        {"hanzi": "一", "pinyin": "yī", "meaning": "1, 하나"},
+        {"hanzi": "二", "pinyin": "èr", "meaning": "2, 둘"},
+        {"hanzi": "三", "pinyin": "sān", "meaning": "3, 셋"},
+        {"hanzi": "四", "pinyin": "sì", "meaning": "4, 넷"},
+        {"hanzi": "五", "pinyin": "wǔ", "meaning": "5, 다섯"},
+        {"hanzi": "六", "pinyin": "liù", "meaning": "6, 여섯"},
+        {"hanzi": "七", "pinyin": "qī", "meaning": "7, 일곱"},
+        {"hanzi": "八", "pinyin": "bā", "meaning": "8, 여덟"},
+        {"hanzi": "九", "pinyin": "jiǔ", "meaning": "9, 아홉"},
+        {"hanzi": "十", "pinyin": "shí", "meaning": "10, 열"}
+      ]
+    },
+    {
+      "title": "3과 · 음식",
+      "words": [
+        {"hanzi": "米饭", "pinyin": "mǐ fàn", "meaning": "밥"},
+        {"hanzi": "面条", "pinyin": "miàn tiáo", "meaning": "국수"},
+        {"hanzi": "饺子", "pinyin": "jiǎo zi", "meaning": "만두"},
+        {"hanzi": "水", "pinyin": "shuǐ", "meaning": "물"},
+        {"hanzi": "茶", "pinyin": "chá", "meaning": "차"},
+        {"hanzi": "咖啡", "pinyin": "kā fēi", "meaning": "커피"},
+        {"hanzi": "苹果", "pinyin": "píng guǒ", "meaning": "사과"},
+        {"hanzi": "好吃", "pinyin": "hǎo chī", "meaning": "맛있다"}
+      ]
+    },
+    {
+      "title": "4과 · 가족",
+      "words": [
+        {"hanzi": "爸爸", "pinyin": "bà ba", "meaning": "아빠"},
+        {"hanzi": "妈妈", "pinyin": "mā ma", "meaning": "엄마"},
+        {"hanzi": "哥哥", "pinyin": "gē ge", "meaning": "형, 오빠"},
+        {"hanzi": "姐姐", "pinyin": "jiě jie", "meaning": "누나, 언니"},
+        {"hanzi": "弟弟", "pinyin": "dì di", "meaning": "남동생"},
+        {"hanzi": "妹妹", "pinyin": "mèi mei", "meaning": "여동생"},
+        {"hanzi": "朋友", "pinyin": "péng you", "meaning": "친구"},
+        {"hanzi": "老师", "pinyin": "lǎo shī", "meaning": "선생님"}
+      ]
+    },
+    {
+      "title": "5과 · 일상",
+      "words": [
+        {"hanzi": "我", "pinyin": "wǒ", "meaning": "나"},
+        {"hanzi": "你", "pinyin": "nǐ", "meaning": "너"},
+        {"hanzi": "喜欢", "pinyin": "xǐ huan", "meaning": "좋아하다"},
+        {"hanzi": "学习", "pinyin": "xué xí", "meaning": "공부하다"},
+        {"hanzi": "中文", "pinyin": "zhōng wén", "meaning": "중국어"},
+        {"hanzi": "今天", "pinyin": "jīn tiān", "meaning": "오늘"},
+        {"hanzi": "明天", "pinyin": "míng tiān", "meaning": "내일"},
+        {"hanzi": "多少钱", "pinyin": "duō shao qián", "meaning": "얼마예요?"}
+      ]
+    }
+  ]
+}
