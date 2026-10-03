@@ -5,6 +5,7 @@
        --device N            사용할 마이크 장치 번호 (기본: 이름에 USB 가 들어간 장치 자동 선택)
        --threshold 0.02      말소리 감지 음량 기준 (주변이 시끄러우면 올리기)
        --vosk-model PATH     오프라인 인식용 Vosk 중국어 모델 폴더
+       --no-voice            목소리(마이크) 기능 끄기 — 메뉴에서 V 키로도 켜고 끌 수 있음
        --scale 3             창 확대 배율
 """
 import argparse
@@ -242,6 +243,7 @@ class Game:
         device = args.device if args.device is not None else voice.find_usb_mic()
         self.mic = voice.VoiceListener(device, args.threshold, args.vosk_model)
         self.mic_name = voice.device_name(device) if voice.sd else "없음"
+        self.voice_on = not args.no_voice
 
         self.scene = "menu"
         self.lesson_i = 0
@@ -267,7 +269,12 @@ class Game:
 
     @property
     def mode(self):
-        return MODES[self.mode_i][0]
+        return self.modes[self.mode_i][0]
+
+    @property
+    def modes(self):
+        """목소리 끔 상태면 말하기 모드를 뺀다."""
+        return MODES if self.voice_on else [m for m in MODES if m[0] != "speak"]
 
     def next_question(self):
         if self.q_index >= len(self.queue) or self.lives <= 0:
@@ -352,11 +359,15 @@ class Game:
             elif key in (pygame.K_DOWN, pygame.K_s):
                 self.lesson_i = (self.lesson_i + 1) % len(self.lessons); self.sfx.play("move")
             elif key in (pygame.K_LEFT, pygame.K_a):
-                self.mode_i = (self.mode_i - 1) % len(MODES); self.sfx.play("move")
+                self.mode_i = (self.mode_i - 1) % len(self.modes); self.sfx.play("move")
             elif key in (pygame.K_RIGHT, pygame.K_d):
-                self.mode_i = (self.mode_i + 1) % len(MODES); self.sfx.play("move")
+                self.mode_i = (self.mode_i + 1) % len(self.modes); self.sfx.play("move")
             elif key in (pygame.K_RETURN, pygame.K_SPACE):
                 self.start_round()
+            elif key == pygame.K_v:
+                self.voice_on = not self.voice_on
+                self.mode_i %= len(self.modes)
+                self.sfx.play("mic" if self.voice_on else "move")
             elif key == pygame.K_ESCAPE:
                 self.running = False
         elif self.scene == "quiz":
@@ -424,10 +435,13 @@ class Game:
             T.draw(c, f"{len(l['words'])}단어", (286, y), GRAY)
 
         my = 62 + 18 * len(self.lessons) + 14
-        T.draw(c, f"◀  {MODES[self.mode_i][1]}  ▶", (W // 2, my), PINK, center=True)
+        T.draw(c, f"◀  {self.modes[self.mode_i][1]}  ▶", (W // 2, my), PINK, center=True)
         T.draw(c, "↑↓ 레슨  ←→ 모드  ENTER 시작", (W // 2, H - 34), GRAY, center=True)
-        mic = self.mic_name if len(self.mic_name) < 30 else self.mic_name[:28] + ".."
-        T.draw(c, f"MIC: {mic}", (W // 2, H - 18), GREEN if voice.sd else RED, center=True)
+        mic = self.mic_name if len(self.mic_name) < 22 else self.mic_name[:20] + ".."
+        if self.voice_on:
+            T.draw(c, f"MIC: {mic}  (V 끄기)", (W // 2, H - 18), GREEN if voice.sd else RED, center=True)
+        else:
+            T.draw(c, "목소리 OFF  (V 켜기)", (W // 2, H - 18), GRAY, center=True)
 
     def draw_hud(self, c):
         T = self.text
@@ -557,6 +571,7 @@ def main():
     p.add_argument("--device", type=int, default=None)
     p.add_argument("--threshold", type=float, default=0.02)
     p.add_argument("--vosk-model", default=None)
+    p.add_argument("--no-voice", action="store_true", help="목소리(마이크) 기능 끄기")
     p.add_argument("--scale", type=int, default=3)
     args = p.parse_args()
     if args.list_devices:

@@ -28,6 +28,7 @@ python main.py
 - 메뉴: `↑↓` 레슨 선택, `←→` 모드 선택, `Enter` 시작
 - 객관식: `1~4` 또는 방향키 + `Enter`, 마우스 클릭
 - 말하기: `Space`(또는 클릭)를 누르고 말하기 → 말이 끝나면(약 0.8초 무음) 자동으로 인식, `Tab` 건너뛰기
+- 메뉴에서 `V`: 목소리(마이크) 기능 켜기/끄기 — 끄면 말하기 모드가 사라지고 객관식만 남아요
 - `Esc` 메뉴로
 
 ## USB 마이크 / 음성 감지
@@ -42,6 +43,7 @@ python main.py --list-devices        # 입력 장치 목록 (USB 표시)
 python main.py --device 2            # 장치 번호 직접 지정
 python main.py --threshold 0.04      # 주변이 시끄러우면 감지 기준 올리기
 python main.py --scale 4             # 창 크게
+python main.py --no-voice            # 목소리 기능 끄고 시작 (마이크 없을 때)
 ```
 
 ### 오프라인 인식 (선택)
