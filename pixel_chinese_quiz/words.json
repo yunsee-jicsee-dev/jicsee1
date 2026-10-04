@@ -1,71 +1,1019 @@
 {
-  "lessons": [
+ "lessons": [
+  {
+   "title": "1과 · 인사",
+   "words": [
     {
-      "title": "1과 · 인사",
-      "words": [
-        {"hanzi": "你好", "pinyin": "nǐ hǎo", "meaning": "안녕하세요"},
-        {"hanzi": "谢谢", "pinyin": "xiè xie", "meaning": "감사합니다"},
-        {"hanzi": "再见", "pinyin": "zài jiàn", "meaning": "안녕히 가세요"},
-        {"hanzi": "对不起", "pinyin": "duì bu qǐ", "meaning": "미안합니다"},
-        {"hanzi": "没关系", "pinyin": "méi guān xi", "meaning": "괜찮아요"},
-        {"hanzi": "早上好", "pinyin": "zǎo shang hǎo", "meaning": "좋은 아침이에요"},
-        {"hanzi": "晚安", "pinyin": "wǎn ān", "meaning": "잘 자요"},
-        {"hanzi": "不客气", "pinyin": "bú kè qi", "meaning": "천만에요"}
-      ]
+     "hanzi": "你好",
+     "pinyin": "nǐ hǎo",
+     "meaning": "안녕하세요"
     },
     {
-      "title": "2과 · 숫자",
-      "words": [
-        {"hanzi": "一", "pinyin": "yī", "meaning": "1, 하나"},
-        {"hanzi": "二", "pinyin": "èr", "meaning": "2, 둘"},
-        {"hanzi": "三", "pinyin": "sān", "meaning": "3, 셋"},
-        {"hanzi": "四", "pinyin": "sì", "meaning": "4, 넷"},
-        {"hanzi": "五", "pinyin": "wǔ", "meaning": "5, 다섯"},
-        {"hanzi": "六", "pinyin": "liù", "meaning": "6, 여섯"},
-        {"hanzi": "七", "pinyin": "qī", "meaning": "7, 일곱"},
-        {"hanzi": "八", "pinyin": "bā", "meaning": "8, 여덟"},
-        {"hanzi": "九", "pinyin": "jiǔ", "meaning": "9, 아홉"},
-        {"hanzi": "十", "pinyin": "shí", "meaning": "10, 열"}
-      ]
+     "hanzi": "谢谢",
+     "pinyin": "xiè xie",
+     "meaning": "감사합니다"
     },
     {
-      "title": "3과 · 음식",
-      "words": [
-        {"hanzi": "米饭", "pinyin": "mǐ fàn", "meaning": "밥"},
-        {"hanzi": "面条", "pinyin": "miàn tiáo", "meaning": "국수"},
-        {"hanzi": "饺子", "pinyin": "jiǎo zi", "meaning": "만두"},
-        {"hanzi": "水", "pinyin": "shuǐ", "meaning": "물"},
-        {"hanzi": "茶", "pinyin": "chá", "meaning": "차"},
-        {"hanzi": "咖啡", "pinyin": "kā fēi", "meaning": "커피"},
-        {"hanzi": "苹果", "pinyin": "píng guǒ", "meaning": "사과"},
-        {"hanzi": "好吃", "pinyin": "hǎo chī", "meaning": "맛있다"}
-      ]
+     "hanzi": "再见",
+     "pinyin": "zài jiàn",
+     "meaning": "안녕히 가세요"
     },
     {
-      "title": "4과 · 가족",
-      "words": [
-        {"hanzi": "爸爸", "pinyin": "bà ba", "meaning": "아빠"},
-        {"hanzi": "妈妈", "pinyin": "mā ma", "meaning": "엄마"},
-        {"hanzi": "哥哥", "pinyin": "gē ge", "meaning": "형, 오빠"},
-        {"hanzi": "姐姐", "pinyin": "jiě jie", "meaning": "누나, 언니"},
-        {"hanzi": "弟弟", "pinyin": "dì di", "meaning": "남동생"},
-        {"hanzi": "妹妹", "pinyin": "mèi mei", "meaning": "여동생"},
-        {"hanzi": "朋友", "pinyin": "péng you", "meaning": "친구"},
-        {"hanzi": "老师", "pinyin": "lǎo shī", "meaning": "선생님"}
-      ]
+     "hanzi": "对不起",
+     "pinyin": "duì bu qǐ",
+     "meaning": "미안합니다"
     },
     {
-      "title": "5과 · 일상",
-      "words": [
-        {"hanzi": "我", "pinyin": "wǒ", "meaning": "나"},
-        {"hanzi": "你", "pinyin": "nǐ", "meaning": "너"},
-        {"hanzi": "喜欢", "pinyin": "xǐ huan", "meaning": "좋아하다"},
-        {"hanzi": "学习", "pinyin": "xué xí", "meaning": "공부하다"},
-        {"hanzi": "中文", "pinyin": "zhōng wén", "meaning": "중국어"},
-        {"hanzi": "今天", "pinyin": "jīn tiān", "meaning": "오늘"},
-        {"hanzi": "明天", "pinyin": "míng tiān", "meaning": "내일"},
-        {"hanzi": "多少钱", "pinyin": "duō shao qián", "meaning": "얼마예요?"}
-      ]
+     "hanzi": "没关系",
+     "pinyin": "méi guān xi",
+     "meaning": "괜찮아요"
+    },
+    {
+     "hanzi": "早上好",
+     "pinyin": "zǎo shang hǎo",
+     "meaning": "좋은 아침이에요"
+    },
+    {
+     "hanzi": "晚安",
+     "pinyin": "wǎn ān",
+     "meaning": "잘 자요"
+    },
+    {
+     "hanzi": "不客气",
+     "pinyin": "bú kè qi",
+     "meaning": "천만에요"
+    },
+    {
+     "hanzi": "您好",
+     "pinyin": "nín hǎo",
+     "meaning": "안녕하세요(존댓말)"
+    },
+    {
+     "hanzi": "欢迎",
+     "pinyin": "huān yíng",
+     "meaning": "환영합니다"
+    },
+    {
+     "hanzi": "请",
+     "pinyin": "qǐng",
+     "meaning": "~해 주세요"
+    },
+    {
+     "hanzi": "认识你很高兴",
+     "pinyin": "rèn shi nǐ hěn gāo xìng",
+     "meaning": "만나서 반가워요"
     }
-  ]
+   ]
+  },
+  {
+   "title": "2과 · 숫자",
+   "words": [
+    {
+     "hanzi": "一",
+     "pinyin": "yī",
+     "meaning": "1, 하나"
+    },
+    {
+     "hanzi": "二",
+     "pinyin": "èr",
+     "meaning": "2, 둘"
+    },
+    {
+     "hanzi": "三",
+     "pinyin": "sān",
+     "meaning": "3, 셋"
+    },
+    {
+     "hanzi": "四",
+     "pinyin": "sì",
+     "meaning": "4, 넷"
+    },
+    {
+     "hanzi": "五",
+     "pinyin": "wǔ",
+     "meaning": "5, 다섯"
+    },
+    {
+     "hanzi": "六",
+     "pinyin": "liù",
+     "meaning": "6, 여섯"
+    },
+    {
+     "hanzi": "七",
+     "pinyin": "qī",
+     "meaning": "7, 일곱"
+    },
+    {
+     "hanzi": "八",
+     "pinyin": "bā",
+     "meaning": "8, 여덟"
+    },
+    {
+     "hanzi": "九",
+     "pinyin": "jiǔ",
+     "meaning": "9, 아홉"
+    },
+    {
+     "hanzi": "十",
+     "pinyin": "shí",
+     "meaning": "10, 열"
+    },
+    {
+     "hanzi": "零",
+     "pinyin": "líng",
+     "meaning": "0, 영"
+    },
+    {
+     "hanzi": "百",
+     "pinyin": "bǎi",
+     "meaning": "100, 백"
+    },
+    {
+     "hanzi": "千",
+     "pinyin": "qiān",
+     "meaning": "1000, 천"
+    },
+    {
+     "hanzi": "万",
+     "pinyin": "wàn",
+     "meaning": "10000, 만"
+    },
+    {
+     "hanzi": "两",
+     "pinyin": "liǎng",
+     "meaning": "두 개(수량)"
+    }
+   ]
+  },
+  {
+   "title": "3과 · 음식",
+   "words": [
+    {
+     "hanzi": "米饭",
+     "pinyin": "mǐ fàn",
+     "meaning": "밥"
+    },
+    {
+     "hanzi": "面条",
+     "pinyin": "miàn tiáo",
+     "meaning": "국수"
+    },
+    {
+     "hanzi": "饺子",
+     "pinyin": "jiǎo zi",
+     "meaning": "만두"
+    },
+    {
+     "hanzi": "水",
+     "pinyin": "shuǐ",
+     "meaning": "물"
+    },
+    {
+     "hanzi": "茶",
+     "pinyin": "chá",
+     "meaning": "차"
+    },
+    {
+     "hanzi": "咖啡",
+     "pinyin": "kā fēi",
+     "meaning": "커피"
+    },
+    {
+     "hanzi": "苹果",
+     "pinyin": "píng guǒ",
+     "meaning": "사과"
+    },
+    {
+     "hanzi": "好吃",
+     "pinyin": "hǎo chī",
+     "meaning": "맛있다"
+    },
+    {
+     "hanzi": "牛奶",
+     "pinyin": "niú nǎi",
+     "meaning": "우유"
+    },
+    {
+     "hanzi": "鸡蛋",
+     "pinyin": "jī dàn",
+     "meaning": "달걀"
+    },
+    {
+     "hanzi": "面包",
+     "pinyin": "miàn bāo",
+     "meaning": "빵"
+    },
+    {
+     "hanzi": "香蕉",
+     "pinyin": "xiāng jiāo",
+     "meaning": "바나나"
+    },
+    {
+     "hanzi": "啤酒",
+     "pinyin": "pí jiǔ",
+     "meaning": "맥주"
+    },
+    {
+     "hanzi": "包子",
+     "pinyin": "bāo zi",
+     "meaning": "찐빵"
+    },
+    {
+     "hanzi": "火锅",
+     "pinyin": "huǒ guō",
+     "meaning": "훠궈"
+    },
+    {
+     "hanzi": "菜单",
+     "pinyin": "cài dān",
+     "meaning": "메뉴판"
+    }
+   ]
+  },
+  {
+   "title": "4과 · 가족",
+   "words": [
+    {
+     "hanzi": "爸爸",
+     "pinyin": "bà ba",
+     "meaning": "아빠"
+    },
+    {
+     "hanzi": "妈妈",
+     "pinyin": "mā ma",
+     "meaning": "엄마"
+    },
+    {
+     "hanzi": "哥哥",
+     "pinyin": "gē ge",
+     "meaning": "형, 오빠"
+    },
+    {
+     "hanzi": "姐姐",
+     "pinyin": "jiě jie",
+     "meaning": "누나, 언니"
+    },
+    {
+     "hanzi": "弟弟",
+     "pinyin": "dì di",
+     "meaning": "남동생"
+    },
+    {
+     "hanzi": "妹妹",
+     "pinyin": "mèi mei",
+     "meaning": "여동생"
+    },
+    {
+     "hanzi": "朋友",
+     "pinyin": "péng you",
+     "meaning": "친구"
+    },
+    {
+     "hanzi": "老师",
+     "pinyin": "lǎo shī",
+     "meaning": "선생님"
+    },
+    {
+     "hanzi": "爷爷",
+     "pinyin": "yé ye",
+     "meaning": "할아버지(친가)"
+    },
+    {
+     "hanzi": "奶奶",
+     "pinyin": "nǎi nai",
+     "meaning": "할머니(친가)"
+    },
+    {
+     "hanzi": "儿子",
+     "pinyin": "ér zi",
+     "meaning": "아들"
+    },
+    {
+     "hanzi": "女儿",
+     "pinyin": "nǚ ér",
+     "meaning": "딸"
+    },
+    {
+     "hanzi": "家",
+     "pinyin": "jiā",
+     "meaning": "집, 가족"
+    },
+    {
+     "hanzi": "学生",
+     "pinyin": "xué sheng",
+     "meaning": "학생"
+    }
+   ]
+  },
+  {
+   "title": "5과 · 일상",
+   "words": [
+    {
+     "hanzi": "我",
+     "pinyin": "wǒ",
+     "meaning": "나"
+    },
+    {
+     "hanzi": "你",
+     "pinyin": "nǐ",
+     "meaning": "너"
+    },
+    {
+     "hanzi": "他",
+     "pinyin": "tā",
+     "meaning": "그"
+    },
+    {
+     "hanzi": "她",
+     "pinyin": "tā",
+     "meaning": "그녀"
+    },
+    {
+     "hanzi": "我们",
+     "pinyin": "wǒ men",
+     "meaning": "우리"
+    },
+    {
+     "hanzi": "喜欢",
+     "pinyin": "xǐ huan",
+     "meaning": "좋아하다"
+    },
+    {
+     "hanzi": "学习",
+     "pinyin": "xué xí",
+     "meaning": "공부하다"
+    },
+    {
+     "hanzi": "中文",
+     "pinyin": "zhōng wén",
+     "meaning": "중국어"
+    },
+    {
+     "hanzi": "今天",
+     "pinyin": "jīn tiān",
+     "meaning": "오늘"
+    },
+    {
+     "hanzi": "明天",
+     "pinyin": "míng tiān",
+     "meaning": "내일"
+    },
+    {
+     "hanzi": "昨天",
+     "pinyin": "zuó tiān",
+     "meaning": "어제"
+    },
+    {
+     "hanzi": "多少钱",
+     "pinyin": "duō shao qián",
+     "meaning": "얼마예요?"
+    },
+    {
+     "hanzi": "是",
+     "pinyin": "shì",
+     "meaning": "~이다"
+    },
+    {
+     "hanzi": "不",
+     "pinyin": "bù",
+     "meaning": "아니다"
+    },
+    {
+     "hanzi": "有",
+     "pinyin": "yǒu",
+     "meaning": "있다, 가지고 있다"
+    },
+    {
+     "hanzi": "没有",
+     "pinyin": "méi yǒu",
+     "meaning": "없다"
+    }
+   ]
+  },
+  {
+   "title": "6과 · 색깔",
+   "words": [
+    {
+     "hanzi": "红色",
+     "pinyin": "hóng sè",
+     "meaning": "빨간색"
+    },
+    {
+     "hanzi": "蓝色",
+     "pinyin": "lán sè",
+     "meaning": "파란색"
+    },
+    {
+     "hanzi": "黄色",
+     "pinyin": "huáng sè",
+     "meaning": "노란색"
+    },
+    {
+     "hanzi": "绿色",
+     "pinyin": "lǜ sè",
+     "meaning": "초록색"
+    },
+    {
+     "hanzi": "白色",
+     "pinyin": "bái sè",
+     "meaning": "흰색"
+    },
+    {
+     "hanzi": "黑色",
+     "pinyin": "hēi sè",
+     "meaning": "검은색"
+    },
+    {
+     "hanzi": "紫色",
+     "pinyin": "zǐ sè",
+     "meaning": "보라색"
+    },
+    {
+     "hanzi": "粉色",
+     "pinyin": "fěn sè",
+     "meaning": "분홍색"
+    },
+    {
+     "hanzi": "橙色",
+     "pinyin": "chéng sè",
+     "meaning": "주황색"
+    },
+    {
+     "hanzi": "灰色",
+     "pinyin": "huī sè",
+     "meaning": "회색"
+    },
+    {
+     "hanzi": "颜色",
+     "pinyin": "yán sè",
+     "meaning": "색깔"
+    }
+   ]
+  },
+  {
+   "title": "7과 · 동물",
+   "words": [
+    {
+     "hanzi": "猫",
+     "pinyin": "māo",
+     "meaning": "고양이"
+    },
+    {
+     "hanzi": "狗",
+     "pinyin": "gǒu",
+     "meaning": "개"
+    },
+    {
+     "hanzi": "熊猫",
+     "pinyin": "xióng māo",
+     "meaning": "판다"
+    },
+    {
+     "hanzi": "鸟",
+     "pinyin": "niǎo",
+     "meaning": "새"
+    },
+    {
+     "hanzi": "鱼",
+     "pinyin": "yú",
+     "meaning": "물고기"
+    },
+    {
+     "hanzi": "马",
+     "pinyin": "mǎ",
+     "meaning": "말"
+    },
+    {
+     "hanzi": "牛",
+     "pinyin": "niú",
+     "meaning": "소"
+    },
+    {
+     "hanzi": "猪",
+     "pinyin": "zhū",
+     "meaning": "돼지"
+    },
+    {
+     "hanzi": "老虎",
+     "pinyin": "lǎo hǔ",
+     "meaning": "호랑이"
+    },
+    {
+     "hanzi": "兔子",
+     "pinyin": "tù zi",
+     "meaning": "토끼"
+    },
+    {
+     "hanzi": "猴子",
+     "pinyin": "hóu zi",
+     "meaning": "원숭이"
+    },
+    {
+     "hanzi": "羊",
+     "pinyin": "yáng",
+     "meaning": "양"
+    },
+    {
+     "hanzi": "龙",
+     "pinyin": "lóng",
+     "meaning": "용"
+    }
+   ]
+  },
+  {
+   "title": "8과 · 시간·요일",
+   "words": [
+    {
+     "hanzi": "现在",
+     "pinyin": "xiàn zài",
+     "meaning": "지금"
+    },
+    {
+     "hanzi": "时间",
+     "pinyin": "shí jiān",
+     "meaning": "시간"
+    },
+    {
+     "hanzi": "点",
+     "pinyin": "diǎn",
+     "meaning": "~시"
+    },
+    {
+     "hanzi": "分钟",
+     "pinyin": "fēn zhōng",
+     "meaning": "~분(동안)"
+    },
+    {
+     "hanzi": "早上",
+     "pinyin": "zǎo shang",
+     "meaning": "아침"
+    },
+    {
+     "hanzi": "中午",
+     "pinyin": "zhōng wǔ",
+     "meaning": "정오, 점심"
+    },
+    {
+     "hanzi": "晚上",
+     "pinyin": "wǎn shang",
+     "meaning": "저녁, 밤"
+    },
+    {
+     "hanzi": "星期一",
+     "pinyin": "xīng qī yī",
+     "meaning": "월요일"
+    },
+    {
+     "hanzi": "星期三",
+     "pinyin": "xīng qī sān",
+     "meaning": "수요일"
+    },
+    {
+     "hanzi": "星期五",
+     "pinyin": "xīng qī wǔ",
+     "meaning": "금요일"
+    },
+    {
+     "hanzi": "星期天",
+     "pinyin": "xīng qī tiān",
+     "meaning": "일요일"
+    },
+    {
+     "hanzi": "周末",
+     "pinyin": "zhōu mò",
+     "meaning": "주말"
+    },
+    {
+     "hanzi": "年",
+     "pinyin": "nián",
+     "meaning": "해, 년"
+    },
+    {
+     "hanzi": "月",
+     "pinyin": "yuè",
+     "meaning": "달, 월"
+    }
+   ]
+  },
+  {
+   "title": "9과 · 장소·교통",
+   "words": [
+    {
+     "hanzi": "学校",
+     "pinyin": "xué xiào",
+     "meaning": "학교"
+    },
+    {
+     "hanzi": "医院",
+     "pinyin": "yī yuàn",
+     "meaning": "병원"
+    },
+    {
+     "hanzi": "商店",
+     "pinyin": "shāng diàn",
+     "meaning": "가게"
+    },
+    {
+     "hanzi": "饭店",
+     "pinyin": "fàn diàn",
+     "meaning": "식당, 호텔"
+    },
+    {
+     "hanzi": "厕所",
+     "pinyin": "cè suǒ",
+     "meaning": "화장실"
+    },
+    {
+     "hanzi": "机场",
+     "pinyin": "jī chǎng",
+     "meaning": "공항"
+    },
+    {
+     "hanzi": "火车站",
+     "pinyin": "huǒ chē zhàn",
+     "meaning": "기차역"
+    },
+    {
+     "hanzi": "地铁",
+     "pinyin": "dì tiě",
+     "meaning": "지하철"
+    },
+    {
+     "hanzi": "公共汽车",
+     "pinyin": "gōng gòng qì chē",
+     "meaning": "버스"
+    },
+    {
+     "hanzi": "出租车",
+     "pinyin": "chū zū chē",
+     "meaning": "택시"
+    },
+    {
+     "hanzi": "飞机",
+     "pinyin": "fēi jī",
+     "meaning": "비행기"
+    },
+    {
+     "hanzi": "银行",
+     "pinyin": "yín háng",
+     "meaning": "은행"
+    },
+    {
+     "hanzi": "公司",
+     "pinyin": "gōng sī",
+     "meaning": "회사"
+    },
+    {
+     "hanzi": "哪儿",
+     "pinyin": "nǎr",
+     "meaning": "어디"
+    }
+   ]
+  },
+  {
+   "title": "10과 · 동작",
+   "words": [
+    {
+     "hanzi": "吃",
+     "pinyin": "chī",
+     "meaning": "먹다"
+    },
+    {
+     "hanzi": "喝",
+     "pinyin": "hē",
+     "meaning": "마시다"
+    },
+    {
+     "hanzi": "看",
+     "pinyin": "kàn",
+     "meaning": "보다"
+    },
+    {
+     "hanzi": "听",
+     "pinyin": "tīng",
+     "meaning": "듣다"
+    },
+    {
+     "hanzi": "说",
+     "pinyin": "shuō",
+     "meaning": "말하다"
+    },
+    {
+     "hanzi": "去",
+     "pinyin": "qù",
+     "meaning": "가다"
+    },
+    {
+     "hanzi": "来",
+     "pinyin": "lái",
+     "meaning": "오다"
+    },
+    {
+     "hanzi": "买",
+     "pinyin": "mǎi",
+     "meaning": "사다"
+    },
+    {
+     "hanzi": "卖",
+     "pinyin": "mài",
+     "meaning": "팔다"
+    },
+    {
+     "hanzi": "睡觉",
+     "pinyin": "shuì jiào",
+     "meaning": "자다"
+    },
+    {
+     "hanzi": "工作",
+     "pinyin": "gōng zuò",
+     "meaning": "일하다"
+    },
+    {
+     "hanzi": "写",
+     "pinyin": "xiě",
+     "meaning": "쓰다"
+    },
+    {
+     "hanzi": "读",
+     "pinyin": "dú",
+     "meaning": "읽다"
+    },
+    {
+     "hanzi": "坐",
+     "pinyin": "zuò",
+     "meaning": "앉다, 타다"
+    },
+    {
+     "hanzi": "想",
+     "pinyin": "xiǎng",
+     "meaning": "생각하다, ~하고 싶다"
+    },
+    {
+     "hanzi": "爱",
+     "pinyin": "ài",
+     "meaning": "사랑하다"
+    }
+   ]
+  },
+  {
+   "title": "11과 · 형용사",
+   "words": [
+    {
+     "hanzi": "大",
+     "pinyin": "dà",
+     "meaning": "크다"
+    },
+    {
+     "hanzi": "小",
+     "pinyin": "xiǎo",
+     "meaning": "작다"
+    },
+    {
+     "hanzi": "多",
+     "pinyin": "duō",
+     "meaning": "많다"
+    },
+    {
+     "hanzi": "少",
+     "pinyin": "shǎo",
+     "meaning": "적다"
+    },
+    {
+     "hanzi": "好",
+     "pinyin": "hǎo",
+     "meaning": "좋다"
+    },
+    {
+     "hanzi": "贵",
+     "pinyin": "guì",
+     "meaning": "비싸다"
+    },
+    {
+     "hanzi": "便宜",
+     "pinyin": "pián yi",
+     "meaning": "싸다"
+    },
+    {
+     "hanzi": "高兴",
+     "pinyin": "gāo xìng",
+     "meaning": "기쁘다"
+    },
+    {
+     "hanzi": "漂亮",
+     "pinyin": "piào liang",
+     "meaning": "예쁘다"
+    },
+    {
+     "hanzi": "忙",
+     "pinyin": "máng",
+     "meaning": "바쁘다"
+    },
+    {
+     "hanzi": "累",
+     "pinyin": "lèi",
+     "meaning": "피곤하다"
+    },
+    {
+     "hanzi": "快",
+     "pinyin": "kuài",
+     "meaning": "빠르다"
+    },
+    {
+     "hanzi": "慢",
+     "pinyin": "màn",
+     "meaning": "느리다"
+    },
+    {
+     "hanzi": "热",
+     "pinyin": "rè",
+     "meaning": "덥다, 뜨겁다"
+    },
+    {
+     "hanzi": "冷",
+     "pinyin": "lěng",
+     "meaning": "춥다, 차갑다"
+    }
+   ]
+  },
+  {
+   "title": "12과 · 날씨·계절",
+   "words": [
+    {
+     "hanzi": "天气",
+     "pinyin": "tiān qì",
+     "meaning": "날씨"
+    },
+    {
+     "hanzi": "下雨",
+     "pinyin": "xià yǔ",
+     "meaning": "비가 오다"
+    },
+    {
+     "hanzi": "下雪",
+     "pinyin": "xià xuě",
+     "meaning": "눈이 오다"
+    },
+    {
+     "hanzi": "晴天",
+     "pinyin": "qíng tiān",
+     "meaning": "맑은 날"
+    },
+    {
+     "hanzi": "刮风",
+     "pinyin": "guā fēng",
+     "meaning": "바람이 불다"
+    },
+    {
+     "hanzi": "春天",
+     "pinyin": "chūn tiān",
+     "meaning": "봄"
+    },
+    {
+     "hanzi": "夏天",
+     "pinyin": "xià tiān",
+     "meaning": "여름"
+    },
+    {
+     "hanzi": "秋天",
+     "pinyin": "qiū tiān",
+     "meaning": "가을"
+    },
+    {
+     "hanzi": "冬天",
+     "pinyin": "dōng tiān",
+     "meaning": "겨울"
+    },
+    {
+     "hanzi": "太阳",
+     "pinyin": "tài yáng",
+     "meaning": "해, 태양"
+    },
+    {
+     "hanzi": "月亮",
+     "pinyin": "yuè liang",
+     "meaning": "달"
+    }
+   ]
+  },
+  {
+   "title": "13과 · 몸",
+   "words": [
+    {
+     "hanzi": "头",
+     "pinyin": "tóu",
+     "meaning": "머리"
+    },
+    {
+     "hanzi": "眼睛",
+     "pinyin": "yǎn jing",
+     "meaning": "눈"
+    },
+    {
+     "hanzi": "耳朵",
+     "pinyin": "ěr duo",
+     "meaning": "귀"
+    },
+    {
+     "hanzi": "鼻子",
+     "pinyin": "bí zi",
+     "meaning": "코"
+    },
+    {
+     "hanzi": "嘴",
+     "pinyin": "zuǐ",
+     "meaning": "입"
+    },
+    {
+     "hanzi": "手",
+     "pinyin": "shǒu",
+     "meaning": "손"
+    },
+    {
+     "hanzi": "脚",
+     "pinyin": "jiǎo",
+     "meaning": "발"
+    },
+    {
+     "hanzi": "肚子",
+     "pinyin": "dù zi",
+     "meaning": "배"
+    },
+    {
+     "hanzi": "身体",
+     "pinyin": "shēn tǐ",
+     "meaning": "몸"
+    },
+    {
+     "hanzi": "疼",
+     "pinyin": "téng",
+     "meaning": "아프다"
+    }
+   ]
+  },
+  {
+   "title": "14과 · 회화 문장",
+   "words": [
+    {
+     "hanzi": "你叫什么名字",
+     "pinyin": "nǐ jiào shén me míng zi",
+     "meaning": "이름이 뭐예요?"
+    },
+    {
+     "hanzi": "我叫",
+     "pinyin": "wǒ jiào",
+     "meaning": "제 이름은 ~예요"
+    },
+    {
+     "hanzi": "你是哪国人",
+     "pinyin": "nǐ shì nǎ guó rén",
+     "meaning": "어느 나라 사람이에요?"
+    },
+    {
+     "hanzi": "我是韩国人",
+     "pinyin": "wǒ shì hán guó rén",
+     "meaning": "저는 한국인이에요"
+    },
+    {
+     "hanzi": "我不懂",
+     "pinyin": "wǒ bù dǒng",
+     "meaning": "이해 못 했어요"
+    },
+    {
+     "hanzi": "请再说一遍",
+     "pinyin": "qǐng zài shuō yí biàn",
+     "meaning": "다시 한번 말해 주세요"
+    },
+    {
+     "hanzi": "这个多少钱",
+     "pinyin": "zhè ge duō shao qián",
+     "meaning": "이거 얼마예요?"
+    },
+    {
+     "hanzi": "太贵了",
+     "pinyin": "tài guì le",
+     "meaning": "너무 비싸요"
+    },
+    {
+     "hanzi": "我饿了",
+     "pinyin": "wǒ è le",
+     "meaning": "배고파요"
+    },
+    {
+     "hanzi": "我爱你",
+     "pinyin": "wǒ ài nǐ",
+     "meaning": "사랑해요"
+    },
+    {
+     "hanzi": "加油",
+     "pinyin": "jiā yóu",
+     "meaning": "힘내!"
+    },
+    {
+     "hanzi": "没问题",
+     "pinyin": "méi wèn tí",
+     "meaning": "문제없어요"
+    }
+   ]
+  }
+ ]
 }

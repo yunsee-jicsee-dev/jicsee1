@@ -514,9 +514,15 @@ class Game:
         draw_sprite(c, PANDA, PANDA_COLORS, (24, 14 + bob), 3)
         draw_sprite(c, PANDA, PANDA_COLORS, (W - 60, 14 - bob), 3)
 
-        panel(c, (60, 62, 280, 18 * len(self.lessons) + 8))
-        for i, l in enumerate(self.lessons):
-            y = 66 + i * 18
+        rows = 6  # 한 화면에 보이는 레슨 수 (나머지는 스크롤)
+        top = min(max(0, self.lesson_i - rows // 2), max(0, len(self.lessons) - rows))
+        panel(c, (60, 62, 280, 18 * rows + 8))
+        if top > 0:
+            T.draw(c, "▲", (344, 64), GOLD, shadow=False)
+        if top + rows < len(self.lessons):
+            T.draw(c, "▼", (344, 62 + 18 * rows - 12), GOLD, shadow=False)
+        for i, l in list(enumerate(self.lessons))[top:top + rows]:
+            y = 66 + (i - top) * 18
             sel = i == self.lesson_i
             if sel:
                 pygame.draw.rect(c, PANEL_DARK, (64, y - 1, 272, 18))
@@ -525,7 +531,7 @@ class Game:
             T.draw(c, l["title"], (88, y), GOLD if sel else WHITE)
             T.draw(c, f"{len(l['words'])}단어", (286, y), GRAY)
 
-        my = 62 + 18 * len(self.lessons) + 14
+        my = 62 + 18 * rows + 18
         T.draw(c, f"◀  {self.modes[self.mode_i][1]}  ▶", (W // 2, my), PINK, center=True)
         T.draw(c, "↑↓ 레슨  ←→ 모드  ENTER 시작", (W // 2, H - 34), GRAY, center=True)
         mic = self.mic_name if len(self.mic_name) < 22 else self.mic_name[:20] + ".."
