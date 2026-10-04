@@ -225,6 +225,14 @@ class Text:
         self.cache[key] = img
         return img
 
+    def fit(self, s, max_width):
+        """화면 폭을 넘으면 뒤를 잘라 '..' 붙이기."""
+        if self.render(s).get_width() <= max_width:
+            return s
+        while s and self.render(s + "..").get_width() > max_width:
+            s = s[:-1]
+        return s + ".."
+
     def draw(self, surf, s, pos, color=WHITE, scale=1, zh=False, center=False, shadow=True):
         img = self.render(s, color, scale, zh, shadow)
         x, y = pos
@@ -376,6 +384,7 @@ class Game:
         self.cursor = 0
         self.feedback = None      # (맞음여부, 타이머)
         self.heard = ""
+        self.notice = ""
         self.tries = 0
         if self.mode in ("meaning", "pinyin"):
             key = "meaning" if self.mode == "meaning" else "pinyin"
@@ -411,9 +420,10 @@ class Game:
         if self.feedback or self.mic.busy:
             return
         if not self.mic.available:
-            self.heard = self.mic.unavailable_reason()
+            self.notice = self.mic.unavailable_reason()
+            print(self.mic.install_hint())
             return
-        self.heard = ""
+        self.heard = self.notice = ""
         self.sfx.play("mic")
         self.mic.start()
 
@@ -424,7 +434,7 @@ class Game:
         if self.mode == "speak" and self.mic.state in ("done", "error") and not self.mic.busy \
                 and not self.feedback:
             if self.mic.state == "error":
-                self.heard = self.mic.error
+                self.notice = self.mic.error
                 self.mic.state = "idle"
             else:
                 self.heard = self.mic.result or "(알아듣지 못했어요)"
@@ -619,8 +629,11 @@ class Game:
             "recognizing": "인식 중" + "." * (int(self.t * 3) % 4),
         }.get(st, "")
         T.draw(c, msg, (46, 154), WHITE)
-        if self.heard:
-            T.draw(c, f"들린 말: {self.heard}"[:40], (46, 200), PINK, zh=bool(self.mic.result))
+        maxw = W - 32 - 46 - 8
+        if self.notice:
+            T.draw(c, T.fit(self.notice, maxw), (46, 200), RED)
+        elif self.heard:
+            T.draw(c, T.fit(f"들린 말: {self.heard}", maxw), (46, 200), PINK, zh=bool(self.mic.result))
         T.draw(c, f"기회 {3 - self.tries}   TAB 건너뛰기", (46, 174), GRAY)
 
     def draw_result(self, c):
@@ -678,7 +691,10 @@ def main():
         for i, name in devs:
             print(f"[{i}] {name}{'   <- USB' if 'usb' in name.lower() else ''}")
         return
-    Game(args).run()
+    game = Game(args)
+    if game.voice_on and not game.mic.available:
+        print(game.mic.install_hint())
+    game.run()
 
 
 if __name__ == "__main__":

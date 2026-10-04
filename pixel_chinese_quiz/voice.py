@@ -110,10 +110,23 @@ class VoiceListener:
         return sd is not None and (sr is not None or self._vosk is not None)
 
     def unavailable_reason(self):
+        """화면에 띄울 짧은 이유."""
         if sd is None:
-            return f"sounddevice 사용 불가: {_SD_ERROR}"
+            return "마이크 모듈(sounddevice) 없음"
         if sr is None and self._vosk is None:
-            return "SpeechRecognition 패키지가 필요합니다"
+            return "음성인식 패키지 없음 (터미널 참고)"
+        return ""
+
+    def install_hint(self):
+        """터미널에 출력할 자세한 설치 안내."""
+        if sd is None:
+            return ("[음성] sounddevice 를 쓸 수 없습니다: " + _SD_ERROR + "\n"
+                    "  sudo apt install libportaudio2\n"
+                    "  pip install sounddevice --break-system-packages")
+        if sr is None and self._vosk is None:
+            return ("[음성] SpeechRecognition 패키지가 없습니다. 설치:\n"
+                    "  pip install SpeechRecognition pypinyin --break-system-packages\n"
+                    "  (라즈베리파이 OS 는 --break-system-packages 가 필요하거나 venv 사용)")
         return ""
 
     @property

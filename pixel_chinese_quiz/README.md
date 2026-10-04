@@ -12,6 +12,15 @@ python main.py
 
 > Linux에서 `sounddevice`가 PortAudio를 못 찾으면 `sudo apt install libportaudio2`
 
+### 라즈베리파이
+
+라즈베리파이 OS는 그냥 `pip install` 하면 막혀서(externally-managed-environment) 음성인식 패키지가 빠질 수 있어요. 아래 한 줄로 설치하세요:
+
+```bash
+./install_pi.sh
+# 또는 직접: pip install SpeechRecognition pypinyin sounddevice --break-system-packages
+```
+
 ## 모드
 
 | 모드 | 내용 |
