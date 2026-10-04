@@ -689,7 +689,11 @@ def main():
         if not devs:
             print("입력 장치를 찾지 못했습니다.", voice._SD_ERROR)
         for i, name in devs:
-            print(f"[{i}] {name}{'   <- USB' if 'usb' in name.lower() else ''}")
+            try:
+                rate = int(voice.sd.query_devices(i)["default_samplerate"])
+            except Exception:
+                rate = "?"
+            print(f"[{i}] {name}  ({rate}Hz){'   <- USB' if 'usb' in name.lower() else ''}")
         return
     game = Game(args)
     if game.voice_on and not game.mic.available:

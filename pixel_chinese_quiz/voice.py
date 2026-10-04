@@ -30,7 +30,6 @@ except ImportError:
     lazy_pinyin = None
 
 SAMPLE_RATE = 16000
-BLOCK = 800  # 50ms
 
 
 def list_input_devices():
@@ -84,6 +83,14 @@ def is_match(heard, target_hanzi):
         return True
     hp, tp = _tone_less(h), _tone_less(t)
     return bool(hp and tp and tp in hp)
+
+
+def resample(x, src_rate, dst_rate):
+    """간단한 선형 보간 리샘플링 (음성 인식용으로 충분)."""
+    if src_rate == dst_rate or len(x) == 0:
+        return x
+    n = int(round(len(x) * dst_rate / src_rate))
+    return np.interp(np.linspace(0, len(x) - 1, n), np.arange(len(x)), x).astype(np.float32)
 
 
 class VoiceListener:
@@ -156,26 +163,60 @@ class VoiceListener:
             self.state = "error"
             self.error = str(e)[:60]
 
+    def _input_config(self):
+        """마이크가 지원하는 (샘플레이트, 채널 수) 찾기.
+
+        USB 마이크는 16000Hz 를 못 받는 경우가 많아서(44100/48000 만 지원)
+        되는 설정으로 녹음한 뒤 16000Hz 로 변환한다.
+        """
+        if getattr(self, "_config", None):
+            return self._config
+        try:
+            info = sd.query_devices(self.device, "input")
+            default_rate = int(info.get("default_samplerate") or 48000)
+            max_ch = int(info.get("max_input_channels") or 1)
+        except Exception:
+            default_rate, max_ch = 48000, 1
+        rates = []
+        for r in (SAMPLE_RATE, default_rate, 48000, 44100, 32000, 22050, 8000):
+            if r not in rates:
+                rates.append(r)
+        last_err = None
+        for ch in sorted({1, max(1, min(max_ch, 2))}):
+            for r in rates:
+                try:
+                    sd.check_input_settings(device=self.device, channels=ch,
+                                            samplerate=r, dtype="float32")
+                except Exception as e:
+                    last_err = e
+                    continue
+                self._config = (r, ch)
+                print(f"[음성] 마이크 설정: {r}Hz, {ch}채널")
+                return self._config
+        raise RuntimeError(f"마이크 설정을 못 찾음: {last_err}")
+
     def _record(self, max_seconds, silence_seconds, wait_seconds):
+        rate, channels = self._input_config()
+        block = int(rate * 0.05)  # 50ms
         q = queue.Queue()
 
         def cb(indata, frames, t, status):
-            q.put(indata[:, 0].copy())
+            q.put(indata.mean(axis=1).copy())  # 여러 채널이면 평균해서 모노로
 
         chunks, pre = [], []
         started = False
         silent_for = 0.0
         t0 = time.time()
-        block_sec = BLOCK / SAMPLE_RATE
-        with sd.InputStream(device=self.device, channels=1, samplerate=SAMPLE_RATE,
-                            blocksize=BLOCK, dtype="float32", callback=cb):
+        block_sec = block / rate
+        with sd.InputStream(device=self.device, channels=channels, samplerate=rate,
+                            blocksize=block, dtype="float32", callback=cb):
             while True:
-                block = q.get(timeout=2)
-                rms = float(np.sqrt(np.mean(block ** 2)))
+                data = q.get(timeout=2)
+                rms = float(np.sqrt(np.mean(data ** 2)))
                 self.level = min(1.0, rms * 8)
                 loud = rms > self.threshold
                 if not started:
-                    pre = (pre + [block])[-6:]  # 말 시작 직전 300ms 보존
+                    pre = (pre + [data])[-6:]  # 말 시작 직전 300ms 보존
                     if loud:
                         started = True
                         self.state = "recording"
@@ -184,12 +225,12 @@ class VoiceListener:
                     elif time.time() - t0 > wait_seconds:
                         return None
                     continue
-                chunks.append(block)
+                chunks.append(data)
                 silent_for = 0.0 if loud else silent_for + block_sec
                 if silent_for >= silence_seconds or time.time() - t0 > max_seconds:
                     break
         self.level = 0.0
-        pcm = np.concatenate(chunks)
+        pcm = resample(np.concatenate(chunks), rate, SAMPLE_RATE)
         return (np.clip(pcm, -1, 1) * 32767).astype(np.int16).tobytes()
 
     def _recognize(self, pcm16):
