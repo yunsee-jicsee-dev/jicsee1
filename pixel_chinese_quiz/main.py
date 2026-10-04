@@ -2,6 +2,7 @@
 
 실행:  python main.py
 옵션:  --list-devices        입력 장치 목록 출력
+       --diagnose            USB 마이크 진단 (터미널) — 게임 메뉴에서는 M 키
        --device N            사용할 마이크 장치 번호 (기본: 이름에 USB 가 들어간 장치 자동 선택)
        --threshold 0.02      말소리 감지 음량 기준 (주변이 시끄러우면 올리기)
        --vosk-model PATH     오프라인 인식용 Vosk 중국어 모델 폴더
@@ -321,6 +322,35 @@ class Stars:
 
 
 # --------------------------------------------------------------- 게임 ----
+SETTINGS_PATH = os.path.join(HERE, "settings.json")
+
+
+def load_settings():
+    try:
+        with open(SETTINGS_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_settings(data):
+    try:
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        print("[설정] 저장 실패:", e)
+
+
+def find_device_by_name(name):
+    """저장된 마이크 이름으로 장치 번호 찾기 (USB 는 꽂을 때마다 번호가 바뀔 수 있음)."""
+    if not name:
+        return None
+    for idx, n in voice.list_input_devices():
+        if n == name:
+            return idx
+    return None
+
+
 class Game:
     def __init__(self, args):
         pygame.init()
@@ -339,8 +369,15 @@ class Game:
         self.lessons.append({"title": "★ 전체 복습", "words": all_words})
         self.all_words = all_words
 
-        device = args.device if args.device is not None else voice.find_usb_mic()
-        self.mic = voice.VoiceListener(device, args.threshold, args.vosk_model)
+        self.settings = load_settings()
+        device = args.device
+        if device is None:
+            device = find_device_by_name(self.settings.get("device_name"))
+        if device is None:
+            device = voice.find_usb_mic()
+        threshold = args.threshold or self.settings.get("threshold") or 0.02
+        self.mic = voice.VoiceListener(device, threshold, args.vosk_model)
+        self.monitor = None
         self.mic_name = voice.device_name(device) if voice.sd else "없음"
         self.voice_on = not args.no_voice
 
@@ -465,6 +502,8 @@ class Game:
                 self.mode_i = (self.mode_i + 1) % len(self.modes); self.sfx.play("move")
             elif key in (pygame.K_RETURN, pygame.K_SPACE):
                 self.start_round()
+            elif key == pygame.K_m:
+                self.open_diag()
             elif key == pygame.K_v:
                 self.voice_on = not self.voice_on
                 self.mode_i %= len(self.modes)
@@ -490,6 +529,20 @@ class Game:
                     self.cursor = (self.cursor + 1) % 4; self.sfx.play("move")
                 elif key in (pygame.K_RETURN, pygame.K_SPACE):
                     self.pick(self.cursor)
+        elif self.scene == "diag":
+            n = len(self.diag_devs)
+            if key in (pygame.K_ESCAPE, pygame.K_m):
+                self.close_diag()
+            elif key in (pygame.K_UP, pygame.K_w) and n:
+                self.diag_i = (self.diag_i - 1) % n; self.sfx.play("move"); self.restart_monitor()
+            elif key in (pygame.K_DOWN, pygame.K_s) and n:
+                self.diag_i = (self.diag_i + 1) % n; self.sfx.play("move"); self.restart_monitor()
+            elif key in (pygame.K_LEFT, pygame.K_a):  # 감도 ↑ (기준 낮춤)
+                self.diag_threshold = max(0.0005, self.diag_threshold * 0.8); self.sfx.play("move")
+            elif key in (pygame.K_RIGHT, pygame.K_d):  # 감도 ↓ (기준 높임)
+                self.diag_threshold = min(0.5, self.diag_threshold * 1.25); self.sfx.play("move")
+            elif key in (pygame.K_RETURN, pygame.K_SPACE) and n:
+                self.apply_diag()
         elif self.scene == "result":
             if key in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_ESCAPE):
                 self.scene = "menu"
@@ -543,12 +596,122 @@ class Game:
 
         my = 62 + 18 * rows + 18
         T.draw(c, f"◀  {self.modes[self.mode_i][1]}  ▶", (W // 2, my), PINK, center=True)
-        T.draw(c, "↑↓ 레슨  ←→ 모드  ENTER 시작", (W // 2, H - 34), GRAY, center=True)
+        T.draw(c, "↑↓ 레슨  ←→ 모드  ENTER 시작  M 마이크진단", (W // 2, H - 34), GRAY, center=True)
         mic = self.mic_name if len(self.mic_name) < 22 else self.mic_name[:20] + ".."
         if self.voice_on:
             T.draw(c, f"MIC: {mic}  (V 끄기)", (W // 2, H - 18), GREEN if voice.sd else RED, center=True)
         else:
             T.draw(c, "목소리 OFF  (V 켜기)", (W // 2, H - 18), GRAY, center=True)
+
+    # ---------------- 마이크 진단 ----------------
+    def open_diag(self):
+        self.diag_devs = voice.list_input_devices()
+        cur = self.mic.device
+        if cur is None and voice.sd is not None:
+            try:
+                cur = voice.sd.default.device[0]
+            except Exception:
+                cur = None
+        idxs = [i for i, _ in self.diag_devs]
+        self.diag_i = idxs.index(cur) if cur in idxs else 0
+        self.diag_threshold = self.mic.threshold
+        self.diag_saved = 0.0
+        self.scene = "diag"
+        self.restart_monitor()
+
+    def restart_monitor(self):
+        if self.monitor:
+            self.monitor.stop()
+        self.monitor = None
+        self.diag_t0 = self.t
+        if self.diag_devs:
+            self.monitor = voice.MicMonitor(self.diag_devs[self.diag_i][0])
+
+    def close_diag(self):
+        if self.monitor:
+            self.monitor.stop()
+        self.monitor = None
+        self.scene = "menu"
+
+    def apply_diag(self):
+        idx, name = self.diag_devs[self.diag_i]
+        self.mic.set_device(idx)
+        self.mic.threshold = self.diag_threshold
+        self.mic_name = name
+        self.settings.update(device_name=name, threshold=round(self.diag_threshold, 5))
+        save_settings(self.settings)
+        self.diag_saved = 2.0
+        self.sfx.play("ok")
+
+    def draw_diag(self, c):
+        T = self.text
+        mon = self.monitor
+        T.draw(c, "마이크 진단", (W // 2, 4), GOLD, center=True)
+        # 장치 목록
+        rows = 5
+        panel(c, (12, 22, W - 24, 18 * rows + 8))
+        if not self.diag_devs:
+            reason = voice._SD_ERROR or "녹음 장치가 없어요 (USB 연결 확인)"
+            T.draw(c, T.fit(reason, W - 48), (24, 30), RED)
+        top = min(max(0, self.diag_i - rows // 2), max(0, len(self.diag_devs) - rows))
+        for i, (idx, name) in list(enumerate(self.diag_devs))[top:top + rows]:
+            y = 26 + (i - top) * 18
+            sel = i == self.diag_i
+            if sel:
+                pygame.draw.rect(c, PANEL_DARK, (16, y - 1, W - 32, 18))
+            using = idx == self.mic.device
+            label = f"{'●' if using else ' '} [{idx}] {name}"
+            col = GOLD if sel else (GREEN if "usb" in name.lower() else WHITE)
+            T.draw(c, T.fit(label, W - 48), (22, y), col)
+
+        # 레벨 미터
+        py = 22 + 18 * rows + 14
+        panel(c, (12, py, W - 24, 66), PANEL_DARK)
+        rms = mon.rms if mon else 0.0
+        lvl = voice.level_from_rms(rms)
+        peak = voice.level_from_rms(mon.peak) if mon else 0.0
+        thr = voice.level_from_rms(self.diag_threshold)
+        detected = rms > self.diag_threshold
+        segs, x0, mw = 40, 60, W - 24 - 60 - 10
+        sw = mw // segs
+        for i in range(segs):
+            f = i / segs
+            on = f < lvl
+            col = (GREEN if f < 0.7 else GOLD if f < 0.85 else RED) if on else PANEL
+            pygame.draw.rect(c, col, (x0 + i * sw, py + 10, sw - 1, 14))
+        pygame.draw.rect(c, WHITE, (x0 + int(peak * segs) * sw, py + 8, 1, 18))   # 최근 최대
+        pygame.draw.rect(c, CYAN, (x0 + int(thr * mw), py + 6, 2, 22))           # 감지 기준선
+        # 초록불 램프
+        lamp = GREEN if detected else (60, 60, 70)
+        pygame.draw.circle(c, (10, 8, 16), (37, py + 19), 13)
+        pygame.draw.circle(c, lamp, (36, py + 18), 12)
+        if detected:
+            pygame.draw.rect(c, WHITE, (30, py + 11, 4, 4))
+        cfg = f"{mon.config[0]}Hz {mon.config[1]}ch" if mon and mon.config else "-"
+        T.draw(c, f"음량 {rms:.4f}  기준 {self.diag_threshold:.4f}  {cfg}", (x0, py + 28), GRAY)
+
+        # 상태 메시지 (원인 안내)
+        elapsed = self.t - getattr(self, "diag_t0", 0)
+        if not self.diag_devs:
+            msg, col = "lsusb / arecord -l 로 USB 인식 확인", GOLD
+        elif mon and mon.error:
+            msg, col = "열기 실패: " + mon.error, RED
+        elif mon and mon.blocks == 0 and elapsed > 1.5:
+            msg, col = "소리 데이터가 안 들어와요 (다른 장치 선택)", RED
+        elif detected:
+            msg, col = "● 소리 감지됨! 이 마이크 OK", GREEN
+        elif mon and mon.max_rms < 0.0005 and elapsed > 2:
+            msg, col = "완전 무음 → 음소거/다른 장치? ↑↓로 바꿔 보세요", GOLD
+        elif mon and mon.max_rms < self.diag_threshold and elapsed > 3:
+            msg, col = "소리가 작아요 → ←키로 감도↑ 또는 alsamixer 볼륨↑", GOLD
+        else:
+            msg, col = "마이크에 대고 말해 보세요", WHITE
+        T.draw(c, T.fit(msg, W - 24 - 60 - 10), (x0, py + 46), col)
+
+        if self.diag_saved > 0:
+            self.diag_saved -= 1 / FPS
+            T.draw(c, "저장됨! 이 마이크를 사용해요", (W // 2, H - 34), GREEN, center=True)
+        T.draw(c, "↑↓ 장치  ←→ 감도  ENTER 사용+저장  ESC 뒤로", (W // 2, H - 18), GRAY, center=True)
 
     def draw_hud(self, c):
         T = self.text
@@ -613,7 +776,7 @@ class Game:
         bars = 24
         lvl = self.mic.level if st in ("waiting", "recording") else 0
         for i in range(bars):
-            on = i < int(lvl * bars * 1.5)
+            on = i < int(lvl * bars)
             col = (GREEN if i < 14 else GOLD if i < 20 else RED) if on else PANEL
             h = 4 + i // 3
             pygame.draw.rect(c, col, (W - 30 - (bars - i) * 6, 196 - h, 4, h))
@@ -672,6 +835,8 @@ class Game:
                     self.handle_click(e.pos)
             self.update(dt)
             self.draw()
+        if self.monitor:
+            self.monitor.stop()
         pygame.quit()
 
 
@@ -679,11 +844,15 @@ def main():
     p = argparse.ArgumentParser(description="픽셀 중국어 퀴즈")
     p.add_argument("--list-devices", action="store_true")
     p.add_argument("--device", type=int, default=None)
-    p.add_argument("--threshold", type=float, default=0.02)
+    p.add_argument("--threshold", type=float, default=None, help="말소리 감지 기준 (기본 0.02)")
+    p.add_argument("--diagnose", action="store_true", help="USB 마이크 진단")
     p.add_argument("--vosk-model", default=None)
     p.add_argument("--no-voice", action="store_true", help="목소리(마이크) 기능 끄기")
     p.add_argument("--scale", type=int, default=3)
     args = p.parse_args()
+    if args.diagnose:
+        voice.diagnose_cli()
+        return
     if args.list_devices:
         devs = voice.list_input_devices()
         if not devs:

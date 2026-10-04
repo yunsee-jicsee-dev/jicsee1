@@ -4,6 +4,7 @@
 - 녹음된 음성을 Google 음성인식(zh-CN, 인터넷 필요) 또는 Vosk(오프라인)로 텍스트 변환
 """
 import json
+import math
 import queue
 import re
 import threading
@@ -93,6 +94,137 @@ def resample(x, src_rate, dst_rate):
     return np.interp(np.linspace(0, len(x) - 1, n), np.arange(len(x)), x).astype(np.float32)
 
 
+def level_from_rms(rms):
+    """RMS → 0~1 레벨 (dB 눈금: -60dB=0, 0dB=1). 작은 소리도 막대가 보이게."""
+    if rms <= 1e-6:
+        return 0.0
+    return max(0.0, min(1.0, (20 * math.log10(rms) + 60) / 60))
+
+
+def probe_input(device):
+    """마이크가 지원하는 (샘플레이트, 채널 수) 찾기.
+
+    USB 마이크는 16000Hz 를 못 받는 경우가 많아서(44100/48000 만 지원)
+    되는 설정으로 녹음한 뒤 16000Hz 로 변환한다.
+    """
+    try:
+        info = sd.query_devices(device, "input")
+        default_rate = int(info.get("default_samplerate") or 48000)
+        max_ch = int(info.get("max_input_channels") or 1)
+    except Exception:
+        default_rate, max_ch = 48000, 1
+    rates = []
+    for r in (SAMPLE_RATE, default_rate, 48000, 44100, 32000, 22050, 8000):
+        if r not in rates:
+            rates.append(r)
+    last_err = None
+    for ch in sorted({1, max(1, min(max_ch, 2))}):
+        for r in rates:
+            try:
+                sd.check_input_settings(device=device, channels=ch, samplerate=r, dtype="float32")
+            except Exception as e:
+                last_err = e
+                continue
+            return r, ch
+    raise RuntimeError(f"마이크 설정을 못 찾음: {last_err}")
+
+
+class MicMonitor:
+    """진단 화면용: 마이크를 계속 열어 두고 음량을 실시간으로 측정."""
+
+    def __init__(self, device):
+        self.device = device
+        self.rms = 0.0
+        self.peak = 0.0       # 최근 최대값 (천천히 떨어짐)
+        self.max_rms = 0.0    # 열린 뒤 최대값
+        self.blocks = 0       # 받은 오디오 블록 수 (0 이면 데이터가 안 들어옴)
+        self.config = None
+        self.error = ""
+        self._stream = None
+        try:
+            if sd is None:
+                raise RuntimeError("sounddevice 없음")
+            rate, ch = self.config = probe_input(device)
+
+            def cb(indata, frames, t, status):
+                r = float(np.sqrt(np.mean(indata.astype(np.float32) ** 2)))
+                self.rms = r
+                self.peak = max(r, self.peak * 0.9)
+                self.max_rms = max(self.max_rms, r)
+                self.blocks += 1
+
+            self._stream = sd.InputStream(device=device, channels=ch, samplerate=rate,
+                                          blocksize=int(rate * 0.05), dtype="float32", callback=cb)
+            self._stream.start()
+        except Exception as e:
+            self.error = str(e)
+
+    def stop(self):
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+
+
+def _run(cmd):
+    try:
+        import subprocess
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        return None
+
+
+def diagnose_cli(seconds=2.0):
+    """터미널용 USB 마이크 진단 (python main.py --diagnose)."""
+    print("=== USB 마이크 진단 ===")
+    usb = _run(["lsusb"])
+    if usb is not None:
+        lines = [l for l in usb.splitlines() if any(k in l.lower() for k in ("audio", "mic", "sound", "usb pnp"))]
+        print("[1] lsusb (오디오 관련):")
+        print("    " + ("\n    ".join(lines) if lines else "없음 → USB 마이크가 인식 안 됨 (다른 포트에 꽂아 보세요)"))
+    arec = _run(["arecord", "-l"])
+    if arec is not None:
+        cards = [l for l in arec.splitlines() if l.startswith(("card", "카드"))]
+        print("[2] arecord -l (ALSA 녹음 장치):")
+        print("    " + ("\n    ".join(cards) if cards else "없음 → 시스템이 녹음 장치를 못 찾음"))
+    if sd is None:
+        print("[3] sounddevice 사용 불가:", _SD_ERROR)
+        print("    sudo apt install libportaudio2 && pip install sounddevice --break-system-packages")
+        return
+    print("[3] sounddevice 입력 장치:")
+    devs = list_input_devices()
+    if not devs:
+        print("    없음")
+    try:
+        default_in = sd.default.device[0]
+    except Exception:
+        default_in = None
+    for i, name in devs:
+        mark = " (기본)" if i == default_in else ""
+        print(f"    [{i}] {name}{mark}{'   <- USB' if 'usb' in name.lower() else ''}")
+    print(f"[4] 장치별 {seconds:.0f}초 녹음 테스트 — 지금 마이크에 대고 말해 보세요!")
+    for i, name in devs:
+        try:
+            rate, ch = probe_input(i)
+            data = sd.rec(int(rate * seconds), samplerate=rate, channels=ch, dtype="float32", device=i)
+            sd.wait()
+            rms = float(np.sqrt(np.mean(data ** 2)))
+            peak = float(np.max(np.abs(data)))
+            if peak < 1e-4:
+                verdict = "무음 (0) → 음소거됐거나 다른 장치"
+            elif peak < 0.02:
+                verdict = "너무 작음 → alsamixer 에서 F6 로 USB 선택, F4(Capture) 볼륨 올리기"
+            else:
+                verdict = "OK! 소리 들어옴"
+            print(f"    [{i}] {rate}Hz {ch}ch  RMS={rms:.4f}  PEAK={peak:.3f}  → {verdict}")
+        except Exception as e:
+            print(f"    [{i}] 열기 실패: {e}")
+    print("팁: 잘 되는 장치 번호로  python3 main.py --device 번호  또는 게임 메뉴에서 M 키(마이크 진단)로 선택·저장")
+
+
 class VoiceListener:
     """백그라운드 스레드에서 한 번 듣고 결과를 돌려주는 리스너."""
 
@@ -163,37 +295,15 @@ class VoiceListener:
             self.state = "error"
             self.error = str(e)[:60]
 
-    def _input_config(self):
-        """마이크가 지원하는 (샘플레이트, 채널 수) 찾기.
+    def set_device(self, device):
+        self.device = device
+        self._config = None
 
-        USB 마이크는 16000Hz 를 못 받는 경우가 많아서(44100/48000 만 지원)
-        되는 설정으로 녹음한 뒤 16000Hz 로 변환한다.
-        """
-        if getattr(self, "_config", None):
-            return self._config
-        try:
-            info = sd.query_devices(self.device, "input")
-            default_rate = int(info.get("default_samplerate") or 48000)
-            max_ch = int(info.get("max_input_channels") or 1)
-        except Exception:
-            default_rate, max_ch = 48000, 1
-        rates = []
-        for r in (SAMPLE_RATE, default_rate, 48000, 44100, 32000, 22050, 8000):
-            if r not in rates:
-                rates.append(r)
-        last_err = None
-        for ch in sorted({1, max(1, min(max_ch, 2))}):
-            for r in rates:
-                try:
-                    sd.check_input_settings(device=self.device, channels=ch,
-                                            samplerate=r, dtype="float32")
-                except Exception as e:
-                    last_err = e
-                    continue
-                self._config = (r, ch)
-                print(f"[음성] 마이크 설정: {r}Hz, {ch}채널")
-                return self._config
-        raise RuntimeError(f"마이크 설정을 못 찾음: {last_err}")
+    def _input_config(self):
+        if not getattr(self, "_config", None):
+            self._config = probe_input(self.device)
+            print(f"[음성] 마이크 설정: {self._config[0]}Hz, {self._config[1]}채널")
+        return self._config
 
     def _record(self, max_seconds, silence_seconds, wait_seconds):
         rate, channels = self._input_config()
@@ -213,7 +323,7 @@ class VoiceListener:
             while True:
                 data = q.get(timeout=2)
                 rms = float(np.sqrt(np.mean(data ** 2)))
-                self.level = min(1.0, rms * 8)
+                self.level = level_from_rms(rms)
                 loud = rms > self.threshold
                 if not started:
                     pre = (pre + [data])[-6:]  # 말 시작 직전 300ms 보존

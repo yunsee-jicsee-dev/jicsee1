@@ -55,6 +55,15 @@ python main.py --scale 4             # 창 크게
 python main.py --no-voice            # 목소리 기능 끄고 시작 (마이크 없을 때)
 ```
 
+### 마이크 진단 (초록불이 안 켜질 때)
+
+- 게임 메뉴에서 **`M`** → 마이크 진단 화면
+  - `↑↓`로 장치를 바꾸면 바로 음량 막대와 **초록불**이 움직이는지 확인
+  - `←→`로 감도(감지 기준선, 하늘색 줄) 조절, `Enter`로 이 마이크 사용 + 저장(`settings.json`, 다음 실행에도 유지)
+- 터미널 진단: `python3 main.py --diagnose`
+  - `lsusb` / `arecord -l`로 USB 마이크가 시스템에 잡혔는지, 장치마다 2초 녹음해서 소리가 들어오는지 알려줌
+- 소리가 너무 작으면: `alsamixer` → `F6`로 USB 장치 선택 → `F4`(Capture) → 볼륨 올리기
+
 ### 오프라인 인식 (선택)
 
 `pip install vosk` 후 [Vosk 중국어 모델](https://alphacephei.com/vosk/models)(`vosk-model-small-cn-0.22`)을 받아서:
