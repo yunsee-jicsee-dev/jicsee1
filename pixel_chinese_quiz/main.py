@@ -393,6 +393,14 @@ def save_settings(data):
         print("[설정] 저장 실패:", e)
 
 
+def find_vosk_model():
+    """게임 폴더 안의 Vosk 중국어 모델 폴더(vosk-model*cn*)가 있으면 자동 사용."""
+    for d in sorted(glob.glob(os.path.join(HERE, "vosk-model*cn*"))):
+        if os.path.isdir(d):
+            return d
+    return None
+
+
 def find_device_by_name(name):
     """저장된 마이크 이름으로 장치 번호 찾기 (USB 는 꽂을 때마다 번호가 바뀔 수 있음)."""
     if not name:
@@ -443,7 +451,8 @@ class Game:
         if device is None:
             device = voice.find_usb_mic()
         threshold = args.threshold or self.settings.get("threshold") or 0.02
-        self.mic = voice.VoiceListener(device, threshold, args.vosk_model)
+        vosk_model = args.vosk_model or find_vosk_model()
+        self.mic = voice.VoiceListener(device, threshold, vosk_model)
         self.monitor = None
         self.mic_name = voice.device_name(device) if voice.sd else "없음"
         self.voice_on = not args.no_voice
@@ -468,6 +477,12 @@ class Game:
         self.wrong = []
         self.scene = "quiz"
         self.sfx.play("start")
+        self.notice = ""
+        if self.mode == "speak" and self.voice_on and self.mic.available:
+            try:
+                self.mic.warm()  # 마이크를 미리 열어 두면 SPACE 누르자마자 녹음 시작
+            except Exception as e:
+                print("[음성] 마이크 열기 실패:", e)
         self.next_question()
 
     @property
@@ -482,6 +497,7 @@ class Game:
     def next_question(self):
         if self.q_index >= len(self.queue) or self.lives <= 0:
             self.scene = "result"
+            self.mic.cool()
             self.sfx.play("clear" if self.lives > 0 else "ng")
             return
         self.word = self.queue[self.q_index]
@@ -580,6 +596,7 @@ class Game:
         elif self.scene == "quiz":
             if key == pygame.K_ESCAPE:
                 self.scene = "menu"
+                self.mic.cool()
             elif self.feedback and key in (pygame.K_RETURN, pygame.K_SPACE):
                 self.feedback[1] = 0
             elif self.mode == "speak":
@@ -677,6 +694,7 @@ class Game:
 
     # ---------------- 마이크 진단 ----------------
     def open_diag(self):
+        self.mic.cool()  # 진단 화면이 마이크를 따로 연다
         self.diag_devs = voice.list_input_devices()
         cur = self.mic.device
         if cur is None and voice.sd is not None:
@@ -1138,6 +1156,7 @@ class Game:
             self.draw()
         if self.monitor:
             self.monitor.stop()
+        self.mic.cool()
         if self.lcd:
             self.lcd.close()
         pygame.quit()

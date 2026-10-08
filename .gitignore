@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 vosk-model*/
 settings.json
+vosk-cn.zip

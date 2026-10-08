@@ -236,11 +236,17 @@ class VoiceListener:
         self.result = None        # 인식된 텍스트
         self.error = ""
         self._thread = None
+        self._stream = None
+        self._listening = False
+        self._noise = None        # 주변 소음 RMS (미리 열어 둔 마이크로 측정)
+        self._vosk_result = ""
+        self._recognizer = sr.Recognizer() if sr else None
         self._vosk = None
         if vosk_model:
             try:
                 from vosk import Model
                 self._vosk = Model(vosk_model)
+                print(f"[음성] 오프라인 인식(Vosk) 사용: {vosk_model}")
             except Exception as e:
                 self.error = f"Vosk 모델 로드 실패: {e}"
 
@@ -272,7 +278,45 @@ class VoiceListener:
     def busy(self):
         return self._thread is not None and self._thread.is_alive()
 
-    def start(self, max_seconds=6.0, silence_seconds=0.8, wait_seconds=5.0):
+    @property
+    def engine(self):
+        return "vosk" if self._vosk is not None else "google"
+
+    # ---------------- 마이크 미리 열어두기 ----------------
+    def warm(self):
+        """마이크 스트림을 미리 열어 둔다 (SPACE 누르는 순간 바로 녹음 + 주변 소음 측정)."""
+        if self._stream is not None or sd is None:
+            return
+        rate, channels = self._input_config()
+        self._rate = rate
+        self._q = queue.Queue(maxsize=400)
+
+        def cb(indata, frames, t, status):
+            data = indata.mean(axis=1).astype(np.float32)  # 여러 채널이면 평균해서 모노로
+            if self._listening:
+                try:
+                    self._q.put_nowait(data)
+                except queue.Full:
+                    pass
+            else:  # 듣지 않는 동안 주변 소음 크기를 계속 측정
+                rms = float(np.sqrt(np.mean(data ** 2)))
+                self._noise = rms if self._noise is None else self._noise * 0.95 + rms * 0.05
+
+        self._stream = sd.InputStream(device=self.device, channels=channels, samplerate=rate,
+                                      blocksize=int(rate * 0.05), dtype="float32", callback=cb)
+        self._stream.start()
+
+    def cool(self):
+        """미리 열어 둔 마이크 닫기 (진단 화면 등 다른 곳에서 마이크를 쓸 때)."""
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+        self._stream = None
+
+    def start(self, max_seconds=4.0, silence_seconds=0.5, wait_seconds=6.0):
         if self.busy or not self.available:
             return
         self.result, self.error, self.level = None, "", 0.0
@@ -283,21 +327,31 @@ class VoiceListener:
 
     def _run(self, max_seconds, silence_seconds, wait_seconds):
         try:
+            t0 = time.time()
             audio = self._record(max_seconds, silence_seconds, wait_seconds)
             if audio is None:
                 self.state = "error"
                 self.error = "소리가 감지되지 않았어요"
                 return
+            t1 = time.time()
             self.state = "recognizing"
             self.result = self._recognize(audio)
+            t2 = time.time()
+            print(f"[음성] 녹음 {len(audio) / 2 / SAMPLE_RATE:.1f}초 (대기 포함 {t1 - t0:.1f}초), "
+                  f"인식({self.engine}) {t2 - t1:.1f}초 → {self.result!r}")
             self.state = "done"
         except Exception as e:
             self.state = "error"
             self.error = str(e)[:60]
+        finally:
+            self._listening = False
+            self.level = 0.0
 
     def set_device(self, device):
+        self.cool()
         self.device = device
         self._config = None
+        self._noise = None
 
     def _input_config(self):
         if not getattr(self, "_config", None):
@@ -306,52 +360,71 @@ class VoiceListener:
         return self._config
 
     def _record(self, max_seconds, silence_seconds, wait_seconds):
-        rate, channels = self._input_config()
-        block = int(rate * 0.05)  # 50ms
-        q = queue.Queue()
+        self.warm()
+        rate = self._rate
+        block_sec = 0.05
+        while not self._q.empty():  # 이전에 쌓인 소리 버리기
+            self._q.get_nowait()
+        self._listening = True
 
-        def cb(indata, frames, t, status):
-            q.put(indata.mean(axis=1).copy())  # 여러 채널이면 평균해서 모노로
+        noise = self._noise or 0.0
+        start_thr = max(self.threshold, noise * 2.0)
+        vosk_rec = None
+        if self._vosk is not None:  # Vosk 는 말하는 동안 바로바로 인식 → 끝나자마자 결과
+            from vosk import KaldiRecognizer
+            vosk_rec = KaldiRecognizer(self._vosk, SAMPLE_RATE)
+
+        def feed(block):
+            if vosk_rec is not None:
+                pcm = resample(block, rate, SAMPLE_RATE)
+                vosk_rec.AcceptWaveform((np.clip(pcm, -1, 1) * 32767).astype(np.int16).tobytes())
 
         chunks, pre = [], []
         started = False
         silent_for = 0.0
+        peak = 0.0
         t0 = time.time()
-        block_sec = block / rate
-        with sd.InputStream(device=self.device, channels=channels, samplerate=rate,
-                            blocksize=block, dtype="float32", callback=cb):
-            while True:
-                data = q.get(timeout=2)
-                rms = float(np.sqrt(np.mean(data ** 2)))
-                self.level = level_from_rms(rms)
-                loud = rms > self.threshold
-                if not started:
-                    pre = (pre + [data])[-6:]  # 말 시작 직전 300ms 보존
-                    if loud:
-                        started = True
-                        self.state = "recording"
-                        chunks = list(pre)
-                        t0 = time.time()
-                    elif time.time() - t0 > wait_seconds:
-                        return None
-                    continue
-                chunks.append(data)
-                silent_for = 0.0 if loud else silent_for + block_sec
-                if silent_for >= silence_seconds or time.time() - t0 > max_seconds:
-                    break
+        while True:
+            data = self._q.get(timeout=2)
+            rms = float(np.sqrt(np.mean(data ** 2)))
+            self.level = level_from_rms(rms)
+            if not started:
+                pre = (pre + [data])[-6:]  # 말 시작 직전 300ms 보존
+                if rms > start_thr:
+                    started = True
+                    self.state = "recording"
+                    chunks = list(pre)
+                    for b in chunks:
+                        feed(b)
+                    t0 = time.time()
+                elif time.time() - t0 > wait_seconds:
+                    return None
+                continue
+            chunks.append(data)
+            feed(data)
+            peak = max(peak, rms)
+            # 말 끝 판단: 고정 기준 + 주변 소음 + 말소리 크기 기준 중 가장 큰 값 아래로 떨어지면 "조용"
+            end_thr = max(self.threshold * 0.8, noise * 1.8, peak * 0.1)
+            silent_for = 0.0 if rms > end_thr else silent_for + block_sec
+            if silent_for >= silence_seconds or time.time() - t0 > max_seconds:
+                break
+        self._listening = False
         self.level = 0.0
+        # 끝의 조용한 부분은 0.15초만 남기고 잘라서 보내는 양 줄이기
+        trim = max(0, int((silent_for - 0.15) / block_sec))
+        if trim and len(chunks) > trim:
+            chunks = chunks[:-trim]
+        if vosk_rec is not None:
+            self._vosk_result = json.loads(vosk_rec.FinalResult()).get("text", "").replace(" ", "")
         pcm = resample(np.concatenate(chunks), rate, SAMPLE_RATE)
         return (np.clip(pcm, -1, 1) * 32767).astype(np.int16).tobytes()
 
     def _recognize(self, pcm16):
         if self._vosk is not None:
-            from vosk import KaldiRecognizer
-            rec = KaldiRecognizer(self._vosk, SAMPLE_RATE)
-            rec.AcceptWaveform(pcm16)
-            return json.loads(rec.FinalResult()).get("text", "").replace(" ", "")
+            return self._vosk_result
         data = sr.AudioData(pcm16, SAMPLE_RATE, 2)
         try:
-            return sr.Recognizer().recognize_google(data, language="zh-CN")
+            return self._recognizer.recognize_google(data, language="zh-CN")
         except sr.UnknownValueError:
             return ""
         except sr.RequestError as e:

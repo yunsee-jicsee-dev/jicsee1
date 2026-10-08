@@ -64,13 +64,22 @@ python main.py --no-voice            # 목소리 기능 끄고 시작 (마이크
   - `lsusb` / `arecord -l`로 USB 마이크가 시스템에 잡혔는지, 장치마다 2초 녹음해서 소리가 들어오는지 알려줌
 - 소리가 너무 작으면: `alsamixer` → `F6`로 USB 장치 선택 → `F4`(Capture) → 볼륨 올리기
 
-### 오프라인 인식 (선택)
+### 인식 속도
 
-`pip install vosk` 후 [Vosk 중국어 모델](https://alphacephei.com/vosk/models)(`vosk-model-small-cn-0.22`)을 받아서:
+- 말하기 모드에 들어가면 마이크를 미리 열어 둬서 `Space`를 누르자마자 녹음이 시작되고, 그동안 주변 소음 크기를 재요.
+- 말이 끝나고 **0.5초** 조용하면 바로 녹음을 끝내요. 주변 소음과 말소리 크기에 맞춰 기준이 자동으로 바뀌어서, 시끄러운 곳에서도 녹음이 늘어지지 않아요.
+- 터미널에 `[음성] 녹음 0.9초 (대기 포함 1.4초), 인식(google) 1.2초` 처럼 어디서 시간이 걸렸는지 나와요.
+
+### 오프라인 인식 (더 빠름)
+
+Google 인식은 인터넷 왕복 때문에 1~2초 걸려요. Vosk를 쓰면 **말하는 동안 바로 인식**해서 말이 끝나자마자 결과가 나와요.
 
 ```bash
-python main.py --vosk-model ./vosk-model-small-cn-0.22
+./get_vosk.sh      # vosk 설치 + 중국어 모델(42MB)을 게임 폴더에 받기
+python3 main.py    # 게임 폴더에 vosk-model*cn* 폴더가 있으면 자동으로 Vosk 사용
 ```
+
+다른 위치의 모델은 `--vosk-model 경로`로 지정할 수 있어요. 정확도는 Google이 조금 더 좋아요 (모델 폴더를 지우거나 옮기면 다시 Google 사용).
 
 ## ST7735S LCD (160x128 가로) 에 띄우기
 
