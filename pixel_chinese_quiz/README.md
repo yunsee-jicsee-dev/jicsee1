@@ -72,6 +72,46 @@ python main.py --no-voice            # 목소리 기능 끄고 시작 (마이크
 python main.py --vosk-model ./vosk-model-small-cn-0.22
 ```
 
+## ST7735S LCD (160x128 가로) 에 띄우기
+
+퀴즈 화면은 LCD에 나오고, PC의 pygame 창은 **키 입력 전용**(현재 화면의 키 안내 + 마지막 누른 키 + LCD 상태)이 됩니다.
+LCD 해상도에 맞춘 전용 레이아웃이라 글자가 뭉개지지 않고, 긴 뜻/문장은 좌우로 흐르면서 보여요.
+
+### 배선 (BCM 기준, SPI0)
+
+| LCD 핀 | 라즈베리파이 |
+|---|---|
+| VCC | 3.3V (1번) |
+| GND | GND (6번) |
+| SCL / SCK | GPIO11 (23번) |
+| SDA / MOSI | GPIO10 (19번) |
+| CS | GPIO8 / CE0 (24번) |
+| DC / A0 / RS | GPIO24 (18번) |
+| RES / RST | GPIO25 (22번) |
+| BL / LED | GPIO18 (12번) 또는 3.3V |
+
+### 준비 & 실행
+
+```bash
+sudo raspi-config        # Interface Options → SPI → Enable (재부팅)
+sudo apt install python3-spidev python3-gpiozero
+python3 main.py --lcd-test     # 색 막대 테스트 화면 (10초)
+./run_lcd.sh                   # = python3 main.py --lcd
+```
+
+`--lcd-test`에서 이상하면 옵션으로 보정하세요 (`run_lcd.sh` 뒤에 붙이면 됨):
+
+| 증상 | 옵션 |
+|---|---|
+| 빨강↔파랑이 바뀜 | `--lcd-rgb` |
+| 색이 반전(네거티브) | `--lcd-invert` |
+| 화면이 거꾸로 | `--lcd-flip` |
+| 가장자리에 쓰레기 줄 / 잘림 | `--lcd-offset 1,2` (x,y) |
+| 핀을 다르게 연결 | `--lcd-dc 24 --lcd-rst 25 --lcd-bl 18` (백라이트 3.3V 직결이면 `--lcd-bl -1`) |
+| 화면이 깨짐 | `--spi-speed 16000000` |
+
+LCD 없이 레이아웃만 보고 싶으면 `python3 main.py --lcd-preview` (키 입력 창 옆에 2배 미리보기).
+
 ## 폰트
 
 `assets/unifont.otf`(GNU Unifont, 도트 폰트)가 같이 들어 있어서 한글·한자·병음·기호가 어떤 OS에서도 □ 없이 나옵니다.

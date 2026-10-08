@@ -8,6 +8,9 @@
        --vosk-model PATH     오프라인 인식용 Vosk 중국어 모델 폴더
        --no-voice            목소리(마이크) 기능 끄기 — 메뉴에서 V 키로도 켜고 끌 수 있음
        --scale 3             창 확대 배율
+       --lcd                 ST7735S(160x128 가로) LCD 에 퀴즈 표시, pygame 창은 키 입력 전용
+       --lcd-preview         LCD 화면을 키 입력 창에도 미리보기 (LCD 없이 테스트할 때도 사용)
+       (LCD 배선/옵션은 st7735.py 와 README 참고)
 """
 import argparse
 import glob
@@ -24,6 +27,7 @@ import voice
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 W, H = 400, 240            # 내부 저해상도 캔버스 (정수 배율로 확대 → 픽셀 느낌)
+LW, LH = 160, 128          # ST7735S 가로 모드 해상도
 QUESTIONS_PER_ROUND = 10
 FPS = 30
 
@@ -308,20 +312,68 @@ def draw_heart(surf, pos, filled=True):
 
 
 class Stars:
-    def __init__(self):
-        self.stars = [(random.randrange(W), random.randrange(H), random.random() * 6) for _ in range(40)]
+    def __init__(self, w=W, h=H, n=40):
+        self.w, self.h = w, h
+        self.stars = [(random.randrange(w), random.randrange(h), random.random() * 6) for _ in range(n)]
 
     def draw(self, surf, t):
         surf.fill(BG)
-        for y in range(0, H, 8):
+        for y in range(0, self.h, 8):
             if (y // 8) % 2:
-                pygame.draw.rect(surf, BG2, (0, y, W, 8))
+                pygame.draw.rect(surf, BG2, (0, y, self.w, 8))
         for x, y, p in self.stars:
             if math.sin(t * 2 + p) > 0.2:
                 surf.set_at((x, y), GRAY)
 
 
 # --------------------------------------------------------------- 게임 ----
+KEYWIN_W, KEYWIN_H = 360, 200   # LCD 모드에서 pygame 키 입력 창 크기
+
+
+def open_lcd(args):
+    """ST7735S 열기. 실패하면 (None, 이유) — 게임은 키 창 미리보기로 계속 동작."""
+    try:
+        from st7735 import ST7735
+        ox, oy = (int(v) for v in args.lcd_offset.split(","))
+        lcd = ST7735(port=args.spi_port, cs=args.spi_cs, dc=args.lcd_dc, rst=args.lcd_rst,
+                     bl=args.lcd_bl, speed_hz=args.spi_speed, flip=args.lcd_flip,
+                     bgr=not args.lcd_rgb, invert=args.lcd_invert, offset_x=ox, offset_y=oy)
+        print("[LCD] ST7735S 160x128 가로 모드 시작")
+        return lcd, ""
+    except Exception as e:
+        print(f"[LCD] 열기 실패: {e}")
+        print("[LCD] SPI 켜기: sudo raspi-config → Interface Options → SPI,  배선은 st7735.py 참고")
+        return None, str(e)
+
+
+def lcd_test(args, seconds=10):
+    """색 막대 + 모서리 표시로 배선/색/방향/오프셋 확인."""
+    import time
+    lcd, err = open_lcd(args)
+    if not lcd:
+        return
+    pygame.init()
+    surf = pygame.Surface((LW, LH))
+    surf.fill((0, 0, 0))
+    bars = [((255, 0, 0), "R"), ((0, 255, 0), "G"), ((0, 0, 255), "B"), ((255, 255, 255), "W")]
+    font = pygame.font.Font(None, 20)
+    for i, (col, name) in enumerate(bars):
+        pygame.draw.rect(surf, col, (i * 40, 30, 40, 50))
+        surf.blit(font.render(name, False, (0, 0, 0) if name == "W" else (255, 255, 255)), (i * 40 + 15, 48))
+    pygame.draw.rect(surf, (255, 255, 0), (0, 0, LW, LH), 1)   # 테두리 (밀림 확인)
+    pygame.draw.rect(surf, (255, 0, 255), (0, 0, 8, 8))         # 왼쪽 위 보라 사각형
+    surf.blit(font.render("TOP-LEFT", False, (255, 255, 255)), (12, 4))
+    surf.blit(font.render("160x128 ST7735S", False, (255, 255, 255)), (20, 96))
+    lcd.show_rgb(pygame.surfarray.array3d(surf).swapaxes(0, 1))
+    print("[LCD 테스트] 확인할 것:")
+    print("  - 막대 색이 왼쪽부터 빨강/초록/파랑/흰색?  R과 B가 바뀌면 --lcd-rgb")
+    print("  - 검정 바탕이 흰색으로(반전) 보이면 --lcd-invert")
+    print("  - 글자가 거꾸로면 --lcd-flip")
+    print("  - 노란 테두리가 잘리거나 쓰레기 줄이 보이면 --lcd-offset 1,2 처럼 보정")
+    time.sleep(seconds)
+    lcd.close()
+
+
 SETTINGS_PATH = os.path.join(HERE, "settings.json")
 
 
@@ -355,8 +407,23 @@ class Game:
     def __init__(self, args):
         pygame.init()
         self.scale = args.scale
-        self.window = pygame.display.set_mode((W * self.scale, H * self.scale))
-        pygame.display.set_caption("像素中文 · 픽셀 중국어 퀴즈")
+        self.lcd_mode = bool(getattr(args, "lcd", False) or getattr(args, "lcd_preview", False))
+        self.lcd = None
+        self.lcd_error = ""
+        self.last_key = ""
+        if self.lcd_mode:
+            # 퀴즈 화면은 LCD 로, pygame 창은 키 입력(+미리보기) 전용
+            self.lcd_preview = getattr(args, "lcd_preview", False)
+            size = (KEYWIN_W + (LW * 2 + 16 if self.lcd_preview else 0), max(KEYWIN_H, LH * 2 + 16))
+            self.window = pygame.display.set_mode(size)
+            pygame.display.set_caption("像素中文 · 키 입력")
+            self.lcd_canvas = pygame.Surface((LW, LH))
+            self.lcd_stars = Stars(LW, LH, 16)
+            if getattr(args, "lcd", False):
+                self.lcd, self.lcd_error = open_lcd(args)
+        else:
+            self.window = pygame.display.set_mode((W * self.scale, H * self.scale))
+            pygame.display.set_caption("像素中文 · 픽셀 중국어 퀴즈")
         self.canvas = pygame.Surface((W, H))
         self.clock = pygame.time.Clock()
         self.text = Text()
@@ -550,6 +617,8 @@ class Game:
                 self.start_round()
 
     def handle_click(self, pos):
+        if self.lcd_mode:  # 키 입력 창에서는 클릭 대신 키만 사용
+            return
         x, y = pos[0] // self.scale, pos[1] // self.scale
         if self.scene == "quiz" and self.choices:
             for i, r in enumerate(self.choice_rects()):
@@ -563,6 +632,9 @@ class Game:
 
     # ---------------- 화면 ----------------
     def draw(self):
+        if self.lcd_mode:
+            self.draw_lcd_mode()
+            return
         c = self.canvas
         self.stars.draw(c, self.t)
         getattr(self, "draw_" + self.scene)(c)
@@ -690,7 +762,19 @@ class Game:
         cfg = f"{mon.config[0]}Hz {mon.config[1]}ch" if mon and mon.config else "-"
         T.draw(c, f"음량 {rms:.4f}  기준 {self.diag_threshold:.4f}  {cfg}", (x0, py + 28), GRAY)
 
-        # 상태 메시지 (원인 안내)
+        msg, col = self.diag_status()
+        T.draw(c, T.fit(msg, W - 24 - 60 - 10), (x0, py + 46), col)
+
+        if self.diag_saved > 0:
+            self.diag_saved -= 1 / FPS
+            T.draw(c, "저장됨! 이 마이크를 사용해요", (W // 2, H - 34), GREEN, center=True)
+        T.draw(c, "↑↓ 장치  ←→ 감도  ENTER 사용+저장  ESC 뒤로", (W // 2, H - 18), GRAY, center=True)
+
+    def diag_status(self):
+        """진단 화면 상태 메시지 (원인 안내)."""
+        mon = self.monitor
+        rms = mon.rms if mon else 0.0
+        detected = rms > self.diag_threshold
         elapsed = self.t - getattr(self, "diag_t0", 0)
         if not self.diag_devs:
             msg, col = "lsusb / arecord -l 로 USB 인식 확인", GOLD
@@ -706,12 +790,7 @@ class Game:
             msg, col = "소리가 작아요 → ←키로 감도↑ 또는 alsamixer 볼륨↑", GOLD
         else:
             msg, col = "마이크에 대고 말해 보세요", WHITE
-        T.draw(c, T.fit(msg, W - 24 - 60 - 10), (x0, py + 46), col)
-
-        if self.diag_saved > 0:
-            self.diag_saved -= 1 / FPS
-            T.draw(c, "저장됨! 이 마이크를 사용해요", (W // 2, H - 34), GREEN, center=True)
-        T.draw(c, "↑↓ 장치  ←→ 감도  ENTER 사용+저장  ESC 뒤로", (W // 2, H - 18), GRAY, center=True)
+        return msg, col
 
     def draw_hud(self, c):
         T = self.text
@@ -785,19 +864,21 @@ class Game:
         col = RED if st == "recording" and int(self.t * 6) % 2 else WHITE
         draw_sprite(c, mic_rows, {"X": col}, (26, 160), 3)
 
-        msg = {
-            "idle": "SPACE / 클릭 → 말하기",
-            "waiting": "듣는 중... 말해 보세요!",
-            "recording": "● 녹음 중",
-            "recognizing": "인식 중" + "." * (int(self.t * 3) % 4),
-        }.get(st, "")
-        T.draw(c, msg, (46, 154), WHITE)
+        T.draw(c, self.mic_status_text(), (46, 154), WHITE)
         maxw = W - 32 - 46 - 8
         if self.notice:
             T.draw(c, T.fit(self.notice, maxw), (46, 200), RED)
         elif self.heard:
             T.draw(c, T.fit(f"들린 말: {self.heard}", maxw), (46, 200), PINK, zh=bool(self.mic.result))
         T.draw(c, f"기회 {3 - self.tries}   TAB 건너뛰기", (46, 174), GRAY)
+
+    def mic_status_text(self, idle="SPACE / 클릭 → 말하기"):
+        return {
+            "idle": idle,
+            "waiting": "듣는 중... 말해 보세요!",
+            "recording": "● 녹음 중",
+            "recognizing": "인식 중" + "." * (int(self.t * 3) % 4),
+        }.get(self.mic.state, "")
 
     def draw_result(self, c):
         T = self.text
@@ -822,6 +903,225 @@ class Game:
         draw_sprite(c, PANDA, PANDA_COLORS, (W - 52, 8 - int(math.sin(self.t * 4) * 2)), 3)
         T.draw(c, "ENTER 메뉴   R 다시하기", (W // 2, H - 30), GRAY, center=True)
 
+    # ---------------- ST7735S LCD 모드 (160x128) ----------------
+    def draw_lcd_mode(self):
+        c = self.lcd_canvas
+        self.lcd_stars.draw(c, self.t)
+        getattr(self, "lcd_" + self.scene)(c)
+        if self.lcd:
+            try:
+                self.lcd.show_rgb(pygame.surfarray.array3d(c).swapaxes(0, 1))
+            except Exception as e:
+                self.lcd_error = f"LCD 전송 오류: {e}"
+                self.lcd = None
+        self.draw_key_window()
+        pygame.display.flip()
+
+    def lcd_line(self, c, s, x, y, maxw, color=WHITE, zh=False, scroll=True, center=False, shadow=True):
+        """한 줄 텍스트. 폭을 넘으면 좌우로 흐르게(scroll) 하거나 잘라서 표시."""
+        T = self.text
+        img = T.render(s, color, 1, zh, shadow)
+        w = img.get_width()
+        if w <= maxw:
+            c.blit(img, (x + (maxw - w) // 2 if center else x, y))
+            return
+        if not scroll:
+            T.draw(c, T.fit(s, maxw), (x, y), color, zh=zh, shadow=shadow)
+            return
+        span = w - maxw
+        cyc = span + 60  # 앞뒤로 잠깐 멈춤
+        off = min(span, max(0, int(self.t * 30) % (cyc + 1) - 30))
+        c.blit(img, (x, y), pygame.Rect(off, 0, maxw, img.get_height()))
+
+    def lcd_word(self, c, hanzi, y):
+        """한자: 4글자 이하는 2배, 길면 1배 크기."""
+        if len(hanzi) <= 4:
+            self.text.draw(c, hanzi, (LW // 2, y), WHITE, 2, zh=True, center=True)
+        else:
+            self.lcd_line(c, hanzi, 2, y + 8, LW - 4, WHITE, zh=True, center=True)
+
+    def lcd_menu(self, c):
+        T = self.text
+        bob = int(math.sin(self.t * 3) * 1)
+        draw_sprite(c, PANDA, PANDA_COLORS, (3, 2 + bob), 1)
+        draw_sprite(c, PANDA, PANDA_COLORS, (LW - 15, 2 - bob), 1)
+        T.draw(c, "像素中文", (LW // 2, 0), GOLD, zh=True, center=True)
+        rows, y0 = 5, 18
+        top = min(max(0, self.lesson_i - rows // 2), max(0, len(self.lessons) - rows))
+        pygame.draw.rect(c, PANEL_DARK, (0, y0 - 1, LW, rows * 16 + 2))
+        for i, l in list(enumerate(self.lessons))[top:top + rows]:
+            y = y0 + (i - top) * 16
+            sel = i == self.lesson_i
+            if sel:
+                pygame.draw.rect(c, PANEL, (0, y, LW, 16))
+                if int(self.t * 4) % 2:
+                    T.draw(c, "▶", (1, y), GOLD, shadow=False)
+            n = str(len(l["words"]))
+            nw = T.render(n, GRAY).get_width()
+            self.lcd_line(c, l["title"], 10, y, LW - 14 - nw, GOLD if sel else WHITE, scroll=sel)
+            T.draw(c, n, (LW - 2 - nw, y), GRAY)
+        if top > 0:
+            pygame.draw.polygon(c, GOLD, [(LW - 6, y0), (LW - 9, y0 + 3), (LW - 3, y0 + 3)])
+        if top + rows < len(self.lessons):
+            yb = y0 + rows * 16 - 1
+            pygame.draw.polygon(c, GOLD, [(LW - 6, yb), (LW - 9, yb - 3), (LW - 3, yb - 3)])
+        self.lcd_line(c, f"◀ {self.modes[self.mode_i][1]} ▶", 0, 104, LW, PINK, center=True)
+        if not self.voice_on:
+            pygame.draw.line(c, GRAY, (LW - 10, 122), (LW - 3, 127))
+
+    def lcd_hud(self, c):
+        T = self.text
+        T.draw(c, f"{self.q_index + 1}/{len(self.queue)}", (1, 0), WHITE)
+        for i in range(3):
+            draw_heart(c, (44 + i * 9, 5), i < self.lives)
+        if self.streak >= 2:
+            T.draw(c, f"x{self.streak}", (74, 0), PINK)
+        sc = f"{self.score:05d}"
+        T.draw(c, sc, (LW - 1 - T.render(sc).get_width(), 0), GOLD)
+        pygame.draw.rect(c, PANEL_DARK, (0, 16, LW, 2))
+        pygame.draw.rect(c, GREEN, (0, 16, int(LW * self.q_index / max(1, len(self.queue))), 2))
+
+    def lcd_quiz(self, c):
+        self.lcd_hud(c)
+        w = self.word
+        if self.mode in ("meaning", "pinyin"):
+            self.lcd_word(c, w["hanzi"], 19)
+            sub, col = (w["pinyin"], GOLD) if self.mode == "meaning" else (w["meaning"], CYAN)
+            self.lcd_line(c, sub, 2, 51, LW - 4, col, center=True)
+            pygame.draw.rect(c, PANEL_DARK, (0, 66, LW, LH - 66))
+            for i, ch in enumerate(self.choices):
+                y = 66 + i * 15 + (i > 0)
+                bg = None
+                if self.feedback:
+                    if ch == w[self.answer_key]:
+                        bg = (46, 120, 60)
+                    elif i == self.cursor:
+                        bg = (140, 40, 50)
+                elif i == self.cursor:
+                    bg = PANEL
+                if bg:
+                    pygame.draw.rect(c, bg, (0, y, LW, 15))
+                self.text.draw(c, str(i + 1), (2, y - 1), GOLD, shadow=False)
+                self.lcd_line(c, ch, 13, y - 1, LW - 15, WHITE, scroll=(i == self.cursor), shadow=False)
+        else:
+            self.lcd_word(c, w["hanzi"], 19)
+            self.lcd_line(c, w["pinyin"], 2, 51, LW - 4, GOLD, center=True)
+            self.lcd_line(c, w["meaning"], 2, 67, LW - 4, CYAN, center=True)
+            self.lcd_line(c, self.mic_status_text("SPACE → 말하기"), 2, 85, LW - 30, WHITE)
+            for i in range(3):  # 남은 기회
+                col = GOLD if i < 3 - self.tries else PANEL_DARK
+                pygame.draw.circle(c, col, (LW - 22 + i * 8, 93), 3)
+            st = self.mic.state
+            lvl = self.mic.level if st in ("waiting", "recording") else 0
+            segs = 32
+            for i in range(segs):
+                on = i / segs < lvl
+                col = (GREEN if i < 22 else GOLD if i < 27 else RED) if on else PANEL_DARK
+                pygame.draw.rect(c, col, (2 + i * 5, 103, 4, 6))
+            if self.notice:
+                self.lcd_line(c, self.notice, 2, 111, LW - 4, RED)
+            elif self.heard:
+                self.lcd_line(c, f"들린 말: {self.heard}", 2, 111, LW - 4, PINK, zh=bool(self.mic.result))
+        if self.feedback:
+            ok = self.feedback[0]
+            bottom = 66 if self.choices else LH - 20
+            pygame.draw.rect(c, (30, 70, 45) if ok else (80, 28, 40), (0, 18, LW, bottom - 18))
+            pygame.draw.rect(c, GREEN if ok else RED, (0, 18, LW, bottom - 18), 1)
+            jump = int(abs(math.sin(self.t * 8)) * 2) if ok else 0
+            self.text.draw(c, "正确!" if ok else "错了…", (LW // 2, 20 - jump), GREEN if ok else RED, 2,
+                           zh=True, center=True)
+            self.lcd_line(c, f"{w['hanzi']} {w['pinyin']} {w['meaning']}", 2, 50, LW - 4, WHITE,
+                          center=True)
+
+    def lcd_result(self, c):
+        T = self.text
+        clear = self.lives > 0
+        total = len(self.queue)
+        correct = total - len(self.wrong) if clear else self.q_index - len(self.wrong)
+        T.draw(c, "CLEAR!" if clear else "GAME OVER", (LW // 2, 0), GOLD if clear else RED, center=True)
+        stars = 3 if not self.wrong and clear else 2 if self.lives >= 2 else 1 if self.lives else 0
+        T.draw(c, "★" * stars + "☆" * (3 - stars), (LW // 2, 17), GOLD, center=True)
+        self.lcd_line(c, f"점수 {self.score}", 2, 34, LW - 4, WHITE, center=True)
+        self.lcd_line(c, f"맞힘 {max(correct, 0)}/{total}  콤보 {self.best_streak}", 2, 50, LW - 4, WHITE,
+                      center=True)
+        if self.wrong:
+            T.draw(c, f"복습할 단어 {len(self.wrong)}개", (2, 70), PINK)
+            pygame.draw.rect(c, PANEL_DARK, (0, 88, LW, LH - 88))
+            for i, wd in enumerate(self.wrong[:2]):
+                self.lcd_line(c, f"{wd['hanzi']} {wd['meaning']}", 2, 90 + i * 18, LW - 4, WHITE,
+                              zh=True, shadow=False)
+        else:
+            self.lcd_line(c, "완벽해요! 太棒了!", 2, 80, LW - 4, GREEN, center=True)
+            draw_sprite(c, PANDA, PANDA_COLORS, (LW // 2 - 12, 100 + int(math.sin(self.t * 4) * 2)), 2)
+
+    def lcd_diag(self, c):
+        T = self.text
+        mon = self.monitor
+        T.draw(c, "마이크 진단", (LW // 2, 0), GOLD, center=True)
+        if self.diag_devs:
+            idx, name = self.diag_devs[self.diag_i]
+            using = "● " if idx == self.mic.device else ""
+            col = GREEN if "usb" in name.lower() else WHITE
+            pygame.draw.rect(c, PANEL, (0, 17, LW, 16))
+            self.lcd_line(c, f"{using}[{idx}] {name}", 2, 17, LW - 4, col)
+            T.draw(c, f"▲▼ 장치 {self.diag_i + 1}/{len(self.diag_devs)}", (2, 34), GRAY)
+        else:
+            self.lcd_line(c, voice._SD_ERROR or "녹음 장치 없음", 2, 17, LW - 4, RED)
+        rms = mon.rms if mon else 0.0
+        detected = rms > self.diag_threshold
+        lamp = GREEN if detected else (60, 60, 70)
+        pygame.draw.circle(c, lamp, (10, 61), 8)
+        if detected:
+            pygame.draw.rect(c, WHITE, (6, 57, 2, 2))
+        x0, mw = 22, LW - 26
+        lvl = voice.level_from_rms(rms)
+        pygame.draw.rect(c, PANEL_DARK, (x0, 55, mw, 12))
+        pygame.draw.rect(c, GREEN if lvl < 0.7 else GOLD if lvl < 0.85 else RED, (x0, 56, int(mw * lvl), 10))
+        pygame.draw.rect(c, CYAN, (x0 + int(voice.level_from_rms(self.diag_threshold) * mw), 53, 2, 16))
+        T.draw(c, f"음량 {rms:.4f}", (2, 72), GRAY)
+        msg, col = self.diag_status()
+        self.lcd_line(c, msg, 2, 90, LW - 4, col)
+        if self.diag_saved > 0:
+            self.diag_saved -= 1 / FPS
+            self.lcd_line(c, "저장됨!", 2, 110, LW - 4, GREEN, center=True)
+        else:
+            self.lcd_line(c, f"감도 기준 {self.diag_threshold:.4f}", 2, 110, LW - 4, GRAY, center=True)
+
+    KEY_HELP = {
+        "menu": ["↑↓ 레슨 고르기   ←→ 모드 바꾸기", "ENTER 시작   V 목소리 켜기/끄기", "M 마이크 진단   ESC 종료"],
+        "quiz_choice": ["1~4 또는 ↑↓ + ENTER 로 고르기", "정답 화면에서 ENTER 다음 문제", "ESC 메뉴로"],
+        "quiz_speak": ["SPACE 말하기 (마이크에 대고)", "TAB 건너뛰기", "ESC 메뉴로"],
+        "result": ["ENTER 메뉴로", "R 다시 하기"],
+        "diag": ["↑↓ 장치 바꾸기   ←→ 감도", "ENTER 이 마이크 사용+저장", "ESC 뒤로"],
+    }
+    SCENE_NAMES = {"menu": "메뉴", "quiz": "퀴즈", "result": "결과", "diag": "마이크 진단"}
+
+    def draw_key_window(self):
+        """pygame 창: 키 입력 전용 (안내 + 마지막 키 + LCD 상태)."""
+        T, win = self.text, self.window
+        win.fill(BG)
+        T.draw(win, "키 입력 창", (12, 8), GOLD, 2)
+        T.draw(win, "이 창을 선택한 상태로 키를 누르세요", (12, 44), GRAY)
+        if self.lcd:
+            T.draw(win, "LCD: ST7735S 160x128 연결됨", (12, 64), GREEN)
+        elif self.lcd_error:
+            T.draw(win, T.fit("LCD 오류: " + self.lcd_error, KEYWIN_W - 24), (12, 64), RED)
+        else:
+            T.draw(win, "LCD 없이 미리보기 모드", (12, 64), CYAN)
+        key = self.scene
+        if self.scene == "quiz":
+            key = "quiz_speak" if self.mode == "speak" else "quiz_choice"
+        pygame.draw.rect(win, PANEL_DARK, (8, 88, KEYWIN_W - 16, 76))
+        T.draw(win, f"[{self.SCENE_NAMES.get(self.scene, self.scene)}]", (14, 92), CYAN)
+        for i, line in enumerate(self.KEY_HELP.get(key, [])):
+            T.draw(win, line, (14, 110 + i * 17), WHITE)
+        if self.last_key:
+            T.draw(win, f"마지막 키: {self.last_key.upper()}", (12, 172), PINK)
+        if self.lcd_preview:
+            x = KEYWIN_W + 8
+            pygame.draw.rect(win, WHITE, (x - 2, 6, LW * 2 + 4, LH * 2 + 4), 1)
+            win.blit(pygame.transform.scale(self.lcd_canvas, (LW * 2, LH * 2)), (x, 8))
+
     # ---------------- 루프 ----------------
     def run(self):
         while self.running:
@@ -830,6 +1130,7 @@ class Game:
                 if e.type == pygame.QUIT:
                     self.running = False
                 elif e.type == pygame.KEYDOWN:
+                    self.last_key = pygame.key.name(e.key)
                     self.handle_key(e.key)
                 elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
                     self.handle_click(e.pos)
@@ -837,6 +1138,8 @@ class Game:
             self.draw()
         if self.monitor:
             self.monitor.stop()
+        if self.lcd:
+            self.lcd.close()
         pygame.quit()
 
 
@@ -849,9 +1152,26 @@ def main():
     p.add_argument("--vosk-model", default=None)
     p.add_argument("--no-voice", action="store_true", help="목소리(마이크) 기능 끄기")
     p.add_argument("--scale", type=int, default=3)
+    g = p.add_argument_group("ST7735S LCD")
+    g.add_argument("--lcd", action="store_true", help="ST7735S LCD 에 퀴즈 표시 (pygame 창은 키 입력용)")
+    g.add_argument("--lcd-preview", action="store_true", help="키 입력 창에 LCD 화면 미리보기")
+    g.add_argument("--lcd-test", action="store_true", help="LCD 색/방향 테스트 화면 10초 표시")
+    g.add_argument("--lcd-flip", action="store_true", help="화면 180도 뒤집기")
+    g.add_argument("--lcd-rgb", action="store_true", help="빨강/파랑이 바뀌어 보이면 사용")
+    g.add_argument("--lcd-invert", action="store_true", help="색이 반전(네거티브)돼 보이면 사용")
+    g.add_argument("--lcd-offset", default="0,0", help="화면이 밀려 보이면 x,y 픽셀 보정 (예: 1,2)")
+    g.add_argument("--lcd-dc", type=int, default=24, help="DC 핀 (BCM, 기본 24)")
+    g.add_argument("--lcd-rst", type=int, default=25, help="RST 핀 (BCM, 기본 25, 없으면 -1)")
+    g.add_argument("--lcd-bl", type=int, default=18, help="백라이트 핀 (BCM, 기본 18, 3.3V 직결이면 -1)")
+    g.add_argument("--spi-port", type=int, default=0)
+    g.add_argument("--spi-cs", type=int, default=0)
+    g.add_argument("--spi-speed", type=int, default=24_000_000)
     args = p.parse_args()
     if args.diagnose:
         voice.diagnose_cli()
+        return
+    if args.lcd_test:
+        lcd_test(args)
         return
     if args.list_devices:
         devs = voice.list_input_devices()
