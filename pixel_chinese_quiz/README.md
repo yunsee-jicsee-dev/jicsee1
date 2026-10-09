@@ -137,6 +137,16 @@ LCD 없이 레이아웃만 보고 싶으면 `python3 main.py --lcd-preview` (키
 - `--intro-loop` : 인트로만 계속 반복 (LCD에서 연출 확인용, 키 누르면 메뉴로)
 - `--intro-fps 90` : 인트로 프레임레이트 (기본 **90**, 퀴즈 화면은 30 고정)
 
+인트로 파일만 따로 실행해서 볼 수도 있어요:
+
+```bash
+python3 intro.py                  # 창에서 반복 재생 (400x240 을 3배로)
+python3 intro.py --size 160x128   # LCD 와 똑같은 화면으로
+python3 intro.py --fps 30 --once  # 프레임레이트 바꿔서 한 번만
+```
+
+LCD(SPI)는 배선 옵션이 필요해서 `python3 main.py --lcd --intro-loop` 쪽을 쓰세요.
+
 ### 90fps
 
 인트로는 퀴즈 화면(30fps)과 달리 **90fps**로 돌립니다 (`intro.py` 의 `FPS`). 연출이 전부 시간(`dt`) 기준이라 프레임레이트를 바꿔도 길이(3.7초)와 타이밍은 그대로고, 떨어지는 라즈베리·광택 스윕·흔들림만 부드러워져요.

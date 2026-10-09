@@ -8,8 +8,16 @@
     주사선이 열리며 전원이 켜짐 → 라즈베리가 위에서 떨어져 착지(충격파+화면 흔들림)
     → 잎 두 장이 펼쳐짐 → "Raspberry Pi" 글자가 한 자씩 올라옴
     → 금색 "5" 가 쾅 등장(섬광) → 로고 위로 광택이 스윽 지나감 → 암전 후 메뉴
+
+이 파일만 실행하면 창에서 인트로만 반복해서 볼 수 있다:
+    python3 intro.py                  # 400x240 을 3배로
+    python3 intro.py --size 160x128   # LCD 와 똑같은 화면
+    python3 intro.py --fps 30 --once  # 프레임레이트 바꿔서 한 번만
+LCD(SPI) 에 띄우는 건 배선 옵션이 필요해서 main.py 쪽:  python3 main.py --lcd --intro-loop
 """
 import math
+import sys
+import time
 
 import pygame
 
@@ -344,3 +352,59 @@ class Intro:
             (x, lh), (x + bw, lh), (x + bw + lh // 2, 0), (x + lh // 2, 0)])
         band.blit(self.logo_mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
         surf.blit(band, (self.logo_x, self.logo_y + shake))
+
+
+# ------------------------------------------------- 혼자 실행해 보기 ----
+def demo(argv=None):
+    """`python3 intro.py` — 인트로만 창에서 반복 재생."""
+    import argparse
+
+    import main   # 폰트(Text)를 그대로 쓴다
+
+    ap = argparse.ArgumentParser(description="라즈베리파이 5 인트로 미리보기")
+    ap.add_argument("--size", default="400x240", help="캔버스 크기 (기본 400x240, LCD 는 160x128)")
+    ap.add_argument("--scale", type=int, default=3, help="창 확대 배율 (기본 3)")
+    ap.add_argument("--fps", type=int, default=FPS, help=f"프레임레이트 (기본 {FPS})")
+    ap.add_argument("--once", action="store_true", help="한 번만 재생하고 끝내기")
+    a = ap.parse_args(argv)
+    try:
+        w, h = (int(v) for v in a.size.lower().split("x"))
+    except ValueError:
+        print("--size 는 400x240 처럼 적어 주세요")
+        return 2
+
+    pygame.init()
+    try:
+        win = pygame.display.set_mode((w * a.scale, h * a.scale))
+    except pygame.error as e:
+        print("창을 열지 못했어요:", e)
+        print("화면 없는 라즈베리파이라면 LCD 로:  python3 main.py --lcd --intro-loop")
+        return 1
+    pygame.display.set_caption("Raspberry Pi 5 인트로")
+    print("아무 키나 누르면 끝납니다.")
+
+    it = Intro(main.Text(), w, h, 2 if w >= 320 else 1)
+    canvas = pygame.Surface((w, h))
+    clock = pygame.time.Clock()
+    t, frames, t0, running = 0.0, 0, time.perf_counter(), True
+    while running:
+        dt = clock.tick(a.fps) / 1000
+        for e in pygame.event.get():
+            if e.type in (pygame.QUIT, pygame.KEYDOWN):
+                running = False
+        it.draw(canvas, t)
+        pygame.transform.scale(canvas, win.get_size(), win)
+        pygame.display.flip()
+        t += dt
+        frames += 1
+        if t >= LENGTH:
+            el = time.perf_counter() - t0
+            print(f"[인트로] {frames}프레임 / {el:.1f}초 = {frames / el:.0f}fps (목표 {a.fps}fps)")
+            running = running and not a.once
+            t, frames, t0 = 0.0, 0, time.perf_counter()
+    pygame.quit()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(demo())
