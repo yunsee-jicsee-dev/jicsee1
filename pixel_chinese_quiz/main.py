@@ -19,10 +19,12 @@ import math
 import os
 import random
 import sys
+import time
 
 import numpy as np
 import pygame
 
+import intro
 import voice
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +32,7 @@ W, H = 400, 240            # 내부 저해상도 캔버스 (정수 배율로 확
 LW, LH = 160, 128          # ST7735S 가로 모드 해상도
 QUESTIONS_PER_ROUND = 10
 FPS = 30
+INTRO_FPS = intro.FPS      # 인트로만 더 부드럽게 (intro.py 에서 정의, 퀴즈 화면은 FPS 그대로)
 
 # 레트로 팔레트
 BG = (24, 20, 37)
@@ -278,6 +281,9 @@ class Sfx:
                 "start": make_beep([392, 523], 0.06),
                 "mic": make_beep([880], 0.05, 0.15),
                 "clear": make_beep([523, 659, 784, 659, 784, 1046], 0.1),
+                "boot": make_beep([165, 220, 294], 0.045, 0.12),
+                "land": make_beep([98, 73], 0.1, 0.3),
+                "logo": make_beep([523, 659, 784, 1046, 1318], 0.07, 0.22),
             }
         except Exception:
             pass
@@ -330,6 +336,15 @@ class Stars:
 KEYWIN_W, KEYWIN_H = 360, 200   # LCD 모드에서 pygame 키 입력 창 크기
 
 
+def lcd_frame_ms(speed_hz):
+    """LCD 한 화면(160x128, 16비트)을 SPI 로 보내는 데 걸리는 시간 (ms)."""
+    return LW * LH * 16 / speed_hz * 1000
+
+
+def lcd_max_fps(speed_hz):
+    return 1000 / lcd_frame_ms(speed_hz)
+
+
 def open_lcd(args):
     """ST7735S 열기. 실패하면 (None, 이유) — 게임은 키 창 미리보기로 계속 동작."""
     try:
@@ -339,6 +354,8 @@ def open_lcd(args):
                      bl=args.lcd_bl, speed_hz=args.spi_speed, flip=args.lcd_flip,
                      bgr=not args.lcd_rgb, invert=args.lcd_invert, offset_x=ox, offset_y=oy)
         print("[LCD] ST7735S 160x128 가로 모드 시작")
+        print(f"[LCD] SPI {args.spi_speed / 1e6:.0f}MHz → 한 프레임 전송 {lcd_frame_ms(args.spi_speed):.1f}ms, "
+              f"최대 약 {lcd_max_fps(args.spi_speed):.0f}fps")
         return lcd, ""
     except Exception as e:
         print(f"[LCD] 열기 실패: {e}")
@@ -457,7 +474,21 @@ class Game:
         self.mic_name = voice.device_name(device) if voice.sd else "없음"
         self.voice_on = not args.no_voice
 
-        self.scene = "menu"
+        self.intro = None
+        self.intro_t = 0.0
+        self.intro_fps = max(10, getattr(args, "intro_fps", INTRO_FPS))
+        self.intro_frames = 0
+        self.intro_t0 = None
+        self.intro_loop = bool(getattr(args, "intro_loop", False))
+        if self.intro_loop or not getattr(args, "no_intro", False):
+            # LCD 모드면 160x128 에, 아니면 큰 캔버스(400x240)에 같은 연출을 2배로
+            self.intro = (intro.Intro(self.text, LW, LH, 1) if self.lcd_mode
+                          else intro.Intro(self.text, W, H, 2))
+            if self.lcd and self.intro_fps > lcd_max_fps(args.spi_speed):
+                need = math.ceil(self.intro_fps * LW * LH * 16 / 1e6) * 1_000_000
+                print(f"[인트로] {self.intro_fps}fps 를 다 내려면 SPI 가 더 빨라야 해요 → "
+                      f"--spi-speed {need}")
+        self.scene = "intro" if self.intro else "menu"
         self.lesson_i = 0
         self.mode_i = 0
         self.t = 0.0
@@ -549,6 +580,21 @@ class Game:
 
     def update(self, dt):
         self.t += dt
+        if self.scene == "intro":
+            if self.intro_t0 is None:
+                self.intro_t0 = time.perf_counter()
+            self.intro_frames += 1
+            prev = self.intro_t
+            self.intro_t += dt
+            for tm, name in intro.CUES:
+                if prev < tm <= self.intro_t:
+                    self.sfx.play(name)
+            if self.intro_t >= intro.LENGTH:
+                self.report_intro_fps()
+                self.intro_t = 0.0 if self.intro_loop else intro.LENGTH
+                if not self.intro_loop:
+                    self.end_intro()
+            return
         if self.scene != "quiz":
             return
         if self.mode == "speak" and self.mic.state in ("done", "error") and not self.mic.busy \
@@ -574,6 +620,9 @@ class Game:
 
     # ---------------- 입력 ----------------
     def handle_key(self, key):
+        if self.scene == "intro":      # 인트로는 아무 키나 누르면 건너뛴다
+            self.end_intro()
+            return
         if self.scene == "menu":
             if key in (pygame.K_UP, pygame.K_w):
                 self.lesson_i = (self.lesson_i - 1) % len(self.lessons); self.sfx.play("move")
@@ -634,6 +683,9 @@ class Game:
                 self.start_round()
 
     def handle_click(self, pos):
+        if self.scene == "intro":
+            self.end_intro()
+            return
         if self.lcd_mode:  # 키 입력 창에서는 클릭 대신 키만 사용
             return
         x, y = pos[0] // self.scale, pos[1] // self.scale
@@ -657,6 +709,24 @@ class Game:
         getattr(self, "draw_" + self.scene)(c)
         pygame.transform.scale(c, self.window.get_size(), self.window)
         pygame.display.flip()
+
+    def end_intro(self):
+        self.report_intro_fps()
+        self.scene = "menu"
+        self.sfx.play("move")
+
+    def report_intro_fps(self):
+        """인트로가 실제로 몇 프레임 나왔는지 (LCD 는 SPI 속도에 걸린다)."""
+        if self.intro_t0 is None:
+            return
+        el = time.perf_counter() - self.intro_t0
+        if el > 0.3:
+            print(f"[인트로] {self.intro_frames}프레임 / {el:.1f}초 = {self.intro_frames / el:.0f}fps "
+                  f"(목표 {self.intro_fps}fps)")
+        self.intro_frames, self.intro_t0 = 0, None
+
+    def draw_intro(self, c):
+        self.intro.draw(c, self.intro_t)
 
     def draw_menu(self, c):
         T = self.text
@@ -958,6 +1028,9 @@ class Game:
         else:
             self.lcd_line(c, hanzi, 2, y + 8, LW - 4, WHITE, zh=True, center=True)
 
+    def lcd_intro(self, c):
+        self.intro.draw(c, self.intro_t)
+
     def lcd_menu(self, c):
         T = self.text
         bob = int(math.sin(self.t * 3) * 1)
@@ -1106,13 +1179,14 @@ class Game:
             self.lcd_line(c, f"감도 기준 {self.diag_threshold:.4f}", 2, 110, LW - 4, GRAY, center=True)
 
     KEY_HELP = {
+        "intro": ["라즈베리파이 5 인트로 재생 중", "아무 키나 누르면 건너뛰기"],
         "menu": ["↑↓ 레슨 고르기   ←→ 모드 바꾸기", "ENTER 시작   V 목소리 켜기/끄기", "M 마이크 진단   ESC 종료"],
         "quiz_choice": ["1~4 또는 ↑↓ + ENTER 로 고르기", "정답 화면에서 ENTER 다음 문제", "ESC 메뉴로"],
         "quiz_speak": ["SPACE 말하기 (마이크에 대고)", "TAB 건너뛰기", "ESC 메뉴로"],
         "result": ["ENTER 메뉴로", "R 다시 하기"],
         "diag": ["↑↓ 장치 바꾸기   ←→ 감도", "ENTER 이 마이크 사용+저장", "ESC 뒤로"],
     }
-    SCENE_NAMES = {"menu": "메뉴", "quiz": "퀴즈", "result": "결과", "diag": "마이크 진단"}
+    SCENE_NAMES = {"intro": "인트로", "menu": "메뉴", "quiz": "퀴즈", "result": "결과", "diag": "마이크 진단"}
 
     def draw_key_window(self):
         """pygame 창: 키 입력 전용 (안내 + 마지막 키 + LCD 상태)."""
@@ -1143,7 +1217,7 @@ class Game:
     # ---------------- 루프 ----------------
     def run(self):
         while self.running:
-            dt = self.clock.tick(FPS) / 1000
+            dt = self.clock.tick(self.intro_fps if self.scene == "intro" else FPS) / 1000
             for e in pygame.event.get():
                 if e.type == pygame.QUIT:
                     self.running = False
@@ -1171,6 +1245,10 @@ def main():
     p.add_argument("--vosk-model", default=None)
     p.add_argument("--no-voice", action="store_true", help="목소리(마이크) 기능 끄기")
     p.add_argument("--scale", type=int, default=3)
+    p.add_argument("--no-intro", action="store_true", help="시작할 때 라즈베리파이 5 인트로 건너뛰기")
+    p.add_argument("--intro-loop", action="store_true", help="인트로만 계속 반복 (LCD 연출 확인용)")
+    p.add_argument("--intro-fps", type=int, default=INTRO_FPS,
+                   help=f"인트로 프레임레이트 (기본 {INTRO_FPS}, 퀴즈 화면은 {FPS} 고정)")
     g = p.add_argument_group("ST7735S LCD")
     g.add_argument("--lcd", action="store_true", help="ST7735S LCD 에 퀴즈 표시 (pygame 창은 키 입력용)")
     g.add_argument("--lcd-preview", action="store_true", help="키 입력 창에 LCD 화면 미리보기")
