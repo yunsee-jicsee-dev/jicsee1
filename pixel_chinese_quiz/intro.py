@@ -76,7 +76,6 @@ LEAF_SPLIT = 13   # 잎을 왼쪽/오른쪽으로 나누는 열 (두 잎이 만�
 BG0 = (10, 7, 16)
 RAY = (46, 26, 58)
 WHITE = (244, 244, 244)
-GRAY = (139, 155, 180)
 GOLD = (254, 174, 52)
 
 FPS = 90          # 인트로 재생 프레임레이트 (연출은 시간 기준이라 값만 바꿔도 길이는 그대로)
@@ -88,7 +87,6 @@ T_LEAF = 1.00     # 잎 펼치기
 T_TEXT = 1.45     # "Raspberry Pi" 한 자씩
 T_FIVE = 2.00     # "5" 등장
 T_SHINE = 2.35    # 광택 스윕
-T_TAG = 2.60      # 아래 한 줄
 T_FADE = 3.35     # 암전 시작
 LENGTH = 3.70     # 전체 길이
 
@@ -139,7 +137,7 @@ class Intro:
         self.T = text
         self.w, self.h, self.k = w, h, k
         # 로고가 화면 높이의 절반쯤 되도록 도트 크기를 고른다 (LCD px=2, 큰 창 px=3)
-        px = self.px = max(1, int(h * 0.56) // LOGO_H)
+        px = self.px = max(1, int(h * 0.60) // LOGO_H)
 
         self.berry = sprite_surface(LOGO, LOGO_COLORS, px, BERRY_KEYS)
         leaves = sprite_surface(LOGO[:LEAF_ROWS], LOGO_COLORS, px, LEAF_KEYS)
@@ -151,24 +149,16 @@ class Intro:
 
         self.title = "Raspberry Pi"
         self.five = "5"
-        # 화면 폭에 맞는 가장 긴 아래 문구를 고른다 (LCD 는 160px 뿐)
-        self.tag = "像素中文"
-        for cand in ("像素中文 · 픽셀 중국어 퀴즈", "像素中文 · 픽셀 중국어", "像素中文 퀴즈"):
-            if text.render(cand, GRAY, k, zh=True, shadow=False).get_width() <= w - 6 * k:
-                self.tag = cand
-                break
-        tag_h = text.render(self.tag, GRAY, k, zh=True, shadow=False).get_height()
         t1 = text.render(self.title, WHITE, k, shadow=False)
         t5 = text.render(self.five, GOLD, 2 * k, shadow=False)
         self.title_h, self.five_h = t1.get_height(), t5.get_height()
 
-        # 세로 배치: 로고 / 글자 / 아래 문구를 남는 높이로 고르게 띄운다
-        gap = max(2 * k, (h - LOGO_H * px - self.five_h - tag_h) // 4)
+        # 세로 배치: 로고와 글자를 남는 높이로 고르게 띄운다
+        gap = max(2 * k, (h - LOGO_H * px - self.five_h) // 3)
         self.logo_x = (w - LOGO_W * px) // 2
         self.logo_y = gap
         self.berry_y = self.logo_y          # 베리의 최종 y (스프라이트 전체 기준)
         self.text_y = self.logo_y + LOGO_H * px + gap
-        self.tag_y = max(h - tag_h - gap, self.text_y + self.five_h + 2 * k)
 
         xgap = 3 * k
         total = t1.get_width() + xgap + t5.get_width()
@@ -322,13 +312,6 @@ class Intro:
         # 로고 위로 광택이 스윽
         if T_SHINE <= t < T_SHINE + 0.55:
             self._shine(surf, (t - T_SHINE) / 0.55, shake)
-
-        # 아래 한 줄
-        if t >= T_TAG:
-            p = clamp01((t - T_TAG) / 0.4)
-            img = self.T.render(self.tag, GRAY, k, zh=True, shadow=False)
-            img.set_alpha(int(200 * p))
-            surf.blit(img, ((w - img.get_width()) // 2, self.tag_y))
 
         # 등장 섬광
         if 0 <= t - T_FIVE < 0.14:
