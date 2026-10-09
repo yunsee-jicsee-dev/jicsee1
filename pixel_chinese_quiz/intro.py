@@ -21,39 +21,48 @@ import time
 
 import pygame
 
-# 라즈베리파이 로고 (25x27 픽셀 아트)
+# 라즈베리파이 로고 (27x34 픽셀 아트)
+# 잎 두 장은 아래 가운데서 만나 위·바깥으로 벌어지고(V자),
+# 베리는 위에서부터 3 / 4 / 3 / 1 = 열한 방울.
 LOGO = [
-    "........ggg...ggg........",
-    ".......ggGG...GGgg.......",
-    "......gGGGG...GGGGg......",
-    ".....ggGGGg...gGGGgg.....",
-    "....ggGGGGg...gGGGGgg....",
-    "....gGGGGg.....gGGGGg....",
-    "....gGGGG.......GGGGg....",
-    "....gGGG....r....GGGg....",
-    "....gGg...rrrrr...gGg....",
-    "......r..rRHHRRr..r......",
-    "....rrrrrrHRRRRrrrrrr....",
-    "...rRHHRRrRRRRRrRHHRRr...",
-    "...rHRRRRrRRRRRrHRRRRr...",
-    "..rrRRRRRrRRRRRrRRRRRrr..",
-    "...rRRRRRrrrrrrrRRRRRr...",
-    "...rRRRRRrrrrrrrRRRRRr...",
-    "....rrrRHHRRrRHHRRrrr....",
-    "......rHRRRRrHRRRRr......",
-    ".....rrRRRRRrRRRRRrr.....",
-    "......rRRRRRrRRRRRr......",
-    "......rRRRRRrRRRRRr......",
-    ".......rrrRHHRRrrr.......",
-    ".........rHRRRRr.........",
-    "........rrRRRRRrr........",
-    ".........rRRRRRr.........",
-    ".........rRRRRRr.........",
-    "..........rrrrr..........",
+    "...........................",
+    "....gg................gg...",
+    "...gGGgg............ggGGg..",
+    "...gGGGGg..........gGGGGg..",
+    "...gGGGGGg........gGGGGGg..",
+    "...gGGGGGGg......gGGGGGGg..",
+    "....gGGGGGGg....gGGGGGGg...",
+    "....gGGGGGGg....gGGGGGGg...",
+    ".....gGGGGGGg..gGGGGGGg....",
+    ".....ggGGGGGg..gGGGGGgg....",
+    "......ggGGGGg..gGGGGgg.....",
+    ".......ggGGGg..gGGGgg......",
+    ".........gggg..gggg........",
+    ".......rrr..rrrr..rrr......",
+    "......rrHRrrrRHrrrHRrr.....",
+    "......rRRRRrRRRRrRRRRr.....",
+    "......rRRRRrRRRRrRRRRr.....",
+    "......rrRRrrRRRRrrRRrr.....",
+    "....rrrrrrrrrrrrrrrrrrrr...",
+    "...rrRrrrrRRrrrrRRrrrrRrr..",
+    "...rHRRrrHRRRrrRHRRrrHRRr..",
+    "..rrRRRrRRRRRrrRRRRRrRRRrr.",
+    "...rRRRrrRRRRrrRRRRrrRRRr..",
+    "...rrRrrrrRRrrrrRRrrrrRrr..",
+    "....rrrrrrrrrrrrrrrrrrrr...",
+    "......rHRRrrHRRRrrHRRr.....",
+    ".....rrRRRrrRRRRrrRRRrr....",
+    ".....rrRRRrrRRRRrrRRRrr....",
+    "......rRRRrrrRRrrrRRRr.....",
+    ".......rrr..rrrr..rrr......",
+    "...........rHRRRr..........",
+    "..........rRRRRRRr.........",
+    "...........rRRRRr..........",
+    "............rrrr...........",
 ]
 LOGO_COLORS = {
     "R": (197, 26, 74),    # 라즈베리 빨강 (브랜드 색)
-    "r": (122, 14, 48),    # 알알이 사이 이음선
+    "r": (96, 14, 40),     # 알알이 사이 이음선 (사진의 검은 테두리 자리)
     "H": (240, 128, 155),  # 반짝임
     "G": (117, 169, 40),   # 잎 초록 (브랜드 색)
     "g": (62, 107, 24),    # 잎 그림자
@@ -61,8 +70,8 @@ LOGO_COLORS = {
 BERRY_KEYS = "RrH"
 LEAF_KEYS = "Gg"
 LOGO_W, LOGO_H = len(LOGO[0]), len(LOGO)
-LEAF_ROWS = 11    # 잎이 그려진 줄 수
-LEAF_SPLIT = 12   # 잎을 왼쪽/오른쪽으로 나누는 열
+LEAF_ROWS = 13    # 잎이 그려진 줄 수
+LEAF_SPLIT = 13   # 잎을 왼쪽/오른쪽으로 나누는 열 (두 잎이 만나는 자리)
 
 BG0 = (10, 7, 16)
 RAY = (46, 26, 58)
@@ -129,7 +138,8 @@ class Intro:
     def __init__(self, text, w, h, k=1):
         self.T = text
         self.w, self.h, self.k = w, h, k
-        px = self.px = 2 * k
+        # 로고가 화면 높이의 절반쯤 되도록 도트 크기를 고른다 (LCD px=2, 큰 창 px=3)
+        px = self.px = max(1, int(h * 0.56) // LOGO_H)
 
         self.berry = sprite_surface(LOGO, LOGO_COLORS, px, BERRY_KEYS)
         leaves = sprite_surface(LOGO[:LEAF_ROWS], LOGO_COLORS, px, LEAF_KEYS)
@@ -138,12 +148,6 @@ class Intro:
             (LEAF_SPLIT * px, 0, (LOGO_W - LEAF_SPLIT) * px, LEAF_ROWS * px)).copy()
         self.logo = sprite_surface(LOGO, LOGO_COLORS, px)
         self.logo_mask = white_mask(self.logo)
-
-        # 배치
-        self.logo_x = (w - LOGO_W * px) // 2
-        self.logo_y = int(h * 0.04)
-        self.berry_y = self.logo_y          # 베리의 최종 y (스프라이트 전체 기준)
-        self.text_y = self.logo_y + LOGO_H * px + 4 * k
 
         self.title = "Raspberry Pi"
         self.five = "5"
@@ -154,14 +158,22 @@ class Intro:
                 self.tag = cand
                 break
         tag_h = text.render(self.tag, GRAY, k, zh=True, shadow=False).get_height()
-        self.tag_y = h - tag_h - 3 * k
         t1 = text.render(self.title, WHITE, k, shadow=False)
         t5 = text.render(self.five, GOLD, 2 * k, shadow=False)
         self.title_h, self.five_h = t1.get_height(), t5.get_height()
-        gap = 3 * k
-        total = t1.get_width() + gap + t5.get_width()
+
+        # 세로 배치: 로고 / 글자 / 아래 문구를 남는 높이로 고르게 띄운다
+        gap = max(2 * k, (h - LOGO_H * px - self.five_h - tag_h) // 4)
+        self.logo_x = (w - LOGO_W * px) // 2
+        self.logo_y = gap
+        self.berry_y = self.logo_y          # 베리의 최종 y (스프라이트 전체 기준)
+        self.text_y = self.logo_y + LOGO_H * px + gap
+        self.tag_y = max(h - tag_h - gap, self.text_y + self.five_h + 2 * k)
+
+        xgap = 3 * k
+        total = t1.get_width() + xgap + t5.get_width()
         self.title_x = (w - total) // 2
-        self.five_x = self.title_x + t1.get_width() + gap
+        self.five_x = self.title_x + t1.get_width() + xgap
         self.five_mid = (self.five_x + t5.get_width() // 2, self.text_y + self.five_h // 2)
 
         self._fx = pygame.Surface((w, h), pygame.SRCALPHA)   # 효과용 재사용 버퍼
