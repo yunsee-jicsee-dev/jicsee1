@@ -127,26 +127,50 @@ class IRReceiver:
 
 # ---------------- 화면 ----------------
 class Screen:
-    BG, FG, DIM = (0, 0, 0), (255, 255, 255), (120, 120, 120)
-    OK, BAD, ACC = (80, 255, 120), (255, 90, 90), (255, 220, 60)
+    """해커 터미널 느낌: 초록 글자, 타이핑 애니메이션, 깜빡이는 커서, 스캔라인."""
+    BG = (0, 8, 2)
+    GREEN, DIM, AMBER, CYAN = (60, 255, 120), (20, 110, 50), (255, 200, 60), (90, 220, 255)
+    TYPE_CPS = 40  # 초당 타이핑 글자 수
 
     def __init__(self, lcd):
         pygame.font.init()
         self.lcd = lcd
         self.font = pygame.font.Font(FONT_PATH if os.path.exists(FONT_PATH) else None, 16)
         self.surf = pygame.Surface((W, H))
+        self.scan = pygame.Surface((W, H), pygame.SRCALPHA)
+        for y in range(0, H, 2):
+            pygame.draw.line(self.scan, (0, 0, 0, 70), (0, y), (W, y))
+        self.cur, self.since, self.history = None, 0.0, []
+
+    def push(self, result):
+        if self.cur:
+            self.history.append(self.cur["code"])
+        self.cur, self.since = result, time.monotonic()
 
     def _text(self, s, pos, color):
         self.surf.blit(self.font.render(s, False, color), pos)
 
-    def draw(self, result, ok, frame, history, count):
-        s = self.surf
+    def draw(self):
+        s, now = self.surf, time.monotonic()
         s.fill(self.BG)
-        if result is None:
-            self._text("버튼을 눌러보세요", (2, 52), self.DIM)
+        self._text("pi@ir:~$ listen", (2, 0), self.DIM)
+        for i, code in enumerate(self.history[-3:]):
+            self._text("> " + code, (2, 18 + i * 16), self.DIM)
+        blink = int(now * 2) % 2 == 0
+        if self.cur is None:
+            self._text("waiting" + "." * (int(now * 3) % 4), (2, 80), self.GREEN)
         else:
-            self._text("코드: " + result["code"], (2, 40), self.FG)
-            self._text("데이터: " + result["data"], (2, 64), self.ACC)
+            lines = [("코드: " + self.cur["code"], self.GREEN),
+                     ("데이터: " + self.cur["data"], self.AMBER)]
+            n = int((now - self.since) * self.TYPE_CPS)
+            for i, (txt, col) in enumerate(lines):
+                self._text(txt[:max(0, n)], (2, 76 + i * 18), col)
+                n -= len(txt)
+            if now - self.since < 0.25:  # 수신 순간 테두리 번쩍
+                pygame.draw.rect(s, self.CYAN, (0, 0, W, H), 2)
+        if blink:
+            pygame.draw.rect(s, self.GREEN, (W - 10, H - 14, 7, 12))
+        s.blit(self.scan, (0, 0))
         if self.lcd:
             rgb = pygame.surfarray.array3d(s).transpose(1, 0, 2)
             self.lcd.show_rgb(np.ascontiguousarray(rgb))
@@ -181,8 +205,7 @@ def main():
 
     ir = IRReceiver(args.ir_pin)
     scr = Screen(lcd)
-    history, count = [], 0
-    scr.draw(None, False, [], history, count)
+    next_draw = 0.0
     print("버튼을 눌러보세요 (Ctrl+C 종료)")
     try:
         while True:
@@ -191,14 +214,17 @@ def main():
                 result, ok = analyze(frame)
                 wanted = result and "v" in result and CODE_MIN <= result["v"] <= CODE_MAX
                 if wanted:
-                    count += 1
-                    print("코드: %s  데이터: %s" % (result["code"], result["data"]))
-                    scr.draw(result, ok, frame, history, count)
+                    print("\033[92m코드: %s\033[0m  \033[93m데이터: %s\033[0m"
+                          % (result["code"], result["data"]))
+                    scr.push(result)
                 elif args.all and result:
                     print("  (무시) [%s] %s  %s  (엣지 %d)" % (result["proto"], result["code"],
                                                             result["data"], len(frame)))
                 if args.raw:
                     print("   ", frame)
+            if time.monotonic() >= next_draw:  # 애니메이션 ~20fps (안 바뀐 프레임은 전송 안 함)
+                scr.draw()
+                next_draw = time.monotonic() + 0.05
             time.sleep(0.01)
     except KeyboardInterrupt:
         pass
