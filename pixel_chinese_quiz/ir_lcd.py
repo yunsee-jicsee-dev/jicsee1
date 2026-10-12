@@ -22,6 +22,8 @@ import pygame  # noqa: E402
 import lgpio  # noqa: E402
 
 W, H = 160, 128
+# 이 리모컨(LG)이 보내는 코드 범위. 이 밖의 신호는 무시
+CODE_MIN, CODE_MAX = 0x880834F, 0x8808F4B
 FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "unifont.otf")
 
 
@@ -39,7 +41,7 @@ def decode_lg(f):
     chk = sum((data >> s) & 0xF for s in (0, 4, 8, 12)) & 0xF
     if chk != (v & 0xF):
         return None
-    return {"proto": "LG28", "code": "0x%07X" % v, "data": "0x%04X" % data}
+    return {"proto": "LG28", "v": v, "code": "0x%07X" % v, "data": "0x%04X" % data}
 
 
 def decode_nec(f):
@@ -137,37 +139,14 @@ class Screen:
     def _text(self, s, pos, color):
         self.surf.blit(self.font.render(s, False, color), pos)
 
-    def _wave(self, frame, y0, h):
-        """엣지 간격을 파형으로 그림 (첫 120ms 를 화면 폭에 맞춤)."""
-        total = min(sum(frame), 120_000) or 1
-        x, level = 0.0, 0  # 수신기 출력은 펄스 중 LOW → 0 부터
-        for dt in frame:
-            nx = x + dt * (W - 2) / total
-            y = y0 + (2 if level == 0 else h)
-            pygame.draw.line(self.surf, self.ACC, (1 + x, y), (1 + min(nx, W - 2), y))
-            if nx >= W - 2:
-                break
-            pygame.draw.line(self.surf, self.ACC, (1 + nx, y0 + 2), (1 + nx, y0 + h))
-            x, level = nx, 1 - level
-
     def draw(self, result, ok, frame, history, count):
         s = self.surf
         s.fill(self.BG)
-        self._text("IR 분석기  #%d" % count, (2, 0), self.DIM)
         if result is None:
-            self._text("리모컨 버튼을", (2, 40), self.FG)
-            self._text("눌러보세요", (2, 58), self.FG)
+            self._text("버튼을 눌러보세요", (2, 52), self.DIM)
         else:
-            self._text(result["proto"], (2, 18), self.OK if ok else self.BAD)
-            self._text("엣지 %d" % len(frame), (90, 18), self.DIM)
-            self._text(result["code"], (2, 36), self.FG)
-            self._text(result["data"], (2, 54), self.ACC)
-            if frame:
-                self._text("리더 %d/%dus" % (frame[0], frame[1] if len(frame) > 1 else 0),
-                           (2, 72), self.DIM)
-            self._wave(frame, 90, 14)
-        for i, hcode in enumerate(history[-1:-2:-1]):
-            self._text("이전: " + hcode, (2, 110 + i * 16), self.DIM)
+            self._text("코드: " + result["code"], (2, 40), self.FG)
+            self._text("데이터: " + result["data"], (2, 64), self.ACC)
         if self.lcd:
             rgb = pygame.surfarray.array3d(s).transpose(1, 0, 2)
             self.lcd.show_rgb(np.ascontiguousarray(rgb))
@@ -177,6 +156,7 @@ def main():
     ap = argparse.ArgumentParser(description="IR 리모컨 신호 분석기 (ST7735S LCD 표시)")
     ap.add_argument("--ir-pin", type=int, default=18)
     ap.add_argument("--no-lcd", action="store_true")
+    ap.add_argument("--all", action="store_true", help="범위 밖/다른 프로토콜 신호도 표시")
     ap.add_argument("--raw", action="store_true", help="터미널에 엣지 간격(µs) 전체 출력")
     ap.add_argument("--lcd-dc", type=int, default=24)
     ap.add_argument("--lcd-rst", type=int, default=25)
@@ -209,16 +189,16 @@ def main():
             frame = ir.get_frame()
             if frame:
                 result, ok = analyze(frame)
-                if result is None:
-                    print("노이즈 (엣지 %d개)" % len(frame))
-                else:
+                wanted = result and "v" in result and CODE_MIN <= result["v"] <= CODE_MAX
+                if wanted:
                     count += 1
-                    print("[%s] %s  %s  (엣지 %d)" % (result["proto"], result["code"],
-                                                      result["data"], len(frame)))
-                    if args.raw:
-                        print("   ", frame)
+                    print("코드: %s  데이터: %s" % (result["code"], result["data"]))
                     scr.draw(result, ok, frame, history, count)
-                    history.append(result["code"])
+                elif args.all and result:
+                    print("  (무시) [%s] %s  %s  (엣지 %d)" % (result["proto"], result["code"],
+                                                            result["data"], len(frame)))
+                if args.raw:
+                    print("   ", frame)
             time.sleep(0.01)
     except KeyboardInterrupt:
         pass
