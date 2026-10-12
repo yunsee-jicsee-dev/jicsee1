@@ -10,7 +10,9 @@
        python3 ir_lcd.py --no-lcd   (터미널만)
 """
 import argparse
+import json
 import os
+import tempfile
 import threading
 import time
 
@@ -24,6 +26,55 @@ import lgpio  # noqa: E402
 W, H = 160, 128
 # 이 리모컨(LG)이 보내는 코드 범위. 이 밖의 신호는 무시
 CODE_MIN, CODE_MAX = 0x880834F, 0x8808F4B
+
+# updev(장치관리자)가 읽는 상태 파일. updev 의 backends/ir.py 와 형식을 맞춰야 함.
+STATE_PATH = os.environ.get("IR_AC_STATE", "/tmp/ir_ac.json")
+STATE_VERSION = 1
+
+
+def ac_temp(v):
+    """LG 에어컨 코드 → 설정 온도(°C). 가운데 4비트(v>>8 & 0xF) + 15. 3→18도 … F→30도."""
+    return ((v >> 8) & 0xF) + 15
+
+
+class StateFile:
+    """IR 수신 상태를 JSON 으로 기록. 원자적 교체(임시파일→rename)라 읽는 쪽이 반쪽 파일을 보지 않음.
+
+    {"version": 1, "pid": 1234, "pin": 18, "started": 1760000000.0, "updated": ...,
+     "count": 3, "last": {"code": "0x8808A4F", "data": "0x08A4", "temp_c": 25, "time": ...}}
+    last 는 아직 받은 게 없으면 null.
+    """
+
+    def __init__(self, pin, path=STATE_PATH):
+        self.path = path
+        self.state = {"version": STATE_VERSION, "pid": os.getpid(), "pin": pin,
+                      "started": time.time(), "updated": time.time(), "count": 0, "last": None}
+        self._write()
+
+    def record(self, result):
+        now = time.time()
+        self.state["count"] += 1
+        self.state["updated"] = now
+        self.state["last"] = {"code": result["code"], "data": result["data"],
+                              "temp_c": ac_temp(result["v"]), "time": now}
+        self._write()
+
+    def _write(self):
+        try:
+            d = os.path.dirname(self.path) or "."
+            fd, tmp = tempfile.mkstemp(dir=d, prefix=".ir_ac.")
+            with os.fdopen(fd, "w") as f:
+                json.dump(self.state, f)
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, self.path)
+        except OSError as e:
+            print("[상태파일] 기록 실패:", e)
+
+    def close(self):
+        try:
+            os.remove(self.path)  # 꺼지면 지워서 updev 가 "실행 안 됨" 으로 표시하게
+        except OSError:
+            pass
 FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "unifont.otf")
 
 
@@ -161,10 +212,11 @@ class Screen:
             self._text("waiting" + "." * (int(now * 3) % 4), (2, 80), self.GREEN)
         else:
             lines = [("코드: " + self.cur["code"], self.GREEN),
-                     ("데이터: " + self.cur["data"], self.AMBER)]
+                     ("데이터: " + self.cur["data"], self.AMBER),
+                     ("온도: %d°C" % ac_temp(self.cur["v"]), self.CYAN)]
             n = int((now - self.since) * self.TYPE_CPS)
             for i, (txt, col) in enumerate(lines):
-                self._text(txt[:max(0, n)], (2, 76 + i * 18), col)
+                self._text(txt[:max(0, n)], (2, 74 + i * 17), col)
                 n -= len(txt)
             if now - self.since < 0.25:  # 수신 순간 테두리 번쩍
                 pygame.draw.rect(s, self.CYAN, (0, 0, W, H), 2)
@@ -204,6 +256,7 @@ def main():
             print("[LCD] 사용 안 함:", e)
 
     ir = IRReceiver(args.ir_pin)
+    state = StateFile(args.ir_pin)
     scr = Screen(lcd)
     next_draw = 0.0
     print("버튼을 눌러보세요 (Ctrl+C 종료)")
@@ -214,9 +267,10 @@ def main():
                 result, ok = analyze(frame)
                 wanted = result and "v" in result and CODE_MIN <= result["v"] <= CODE_MAX
                 if wanted:
-                    print("\033[92m코드: %s\033[0m  \033[93m데이터: %s\033[0m"
-                          % (result["code"], result["data"]))
+                    print("\033[92m코드: %s\033[0m  \033[93m데이터: %s\033[0m  \033[96m%d°C\033[0m"
+                          % (result["code"], result["data"], ac_temp(result["v"])))
                     scr.push(result)
+                    state.record(result)
                 elif args.all and result:
                     print("  (무시) [%s] %s  %s  (엣지 %d)" % (result["proto"], result["code"],
                                                             result["data"], len(frame)))
@@ -230,6 +284,7 @@ def main():
         pass
     finally:
         ir.close()
+        state.close()
         if lcd:
             lcd.close()
 
