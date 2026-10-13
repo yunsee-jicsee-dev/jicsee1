@@ -1,6 +1,8 @@
 """IR 리모컨 신호 분석기 — ST7735S LCD 에 결과 표시.
 
 수신기(VS1838B 등) OUT → GPIO18 (기본, --ir-pin 으로 변경)
+피에조 부저 + → GPIO23 (16번 핀), - → GND  (기본, --buzzer-pin 으로 변경, -1 이면 끔)
+  설정온도를 음 높이로 알려줌: 18°C=도 … 30°C=한 옥타브 위 도
 
 ※ st7735.py 기본 배선에서 LCD 백라이트(BL)도 GPIO18 이라 핀이 겹칩니다.
   IR 을 GPIO18 에 두면 LCD BL 은 3.3V 에 직접 연결하세요 (이 툴은 자동으로 BL 제어를 끔).
@@ -139,6 +141,64 @@ def analyze(frame):
 
 
 # ---------------- IR 수신 ----------------
+class Buzzer:
+    """피에조 부저로 설정온도를 소리로 알림. 18°C=도(C5) … 30°C=한 옥타브 위 도(C6), 1도에 반음씩.
+
+    수동(passive) 부저: PWM 주파수로 음 높이가 바뀜 (기본).
+    능동(active) 부저: 전원만 주면 고정음 → 음 높이 대신 짧게 한 번 삑.
+    IR 수신을 막지 않도록 소리는 별도 스레드에서 냄.
+    """
+
+    BASE_HZ = 523.25  # C5 = 18°C
+
+    def __init__(self, h, pin, active=False):
+        self.h, self.pin, self.active = h, pin, active
+        lgpio.gpio_claim_output(h, pin, 0)
+        self._lock = threading.Lock()
+
+    def freq(self, temp_c):
+        return self.BASE_HZ * 2 ** ((temp_c - 18) / 12)
+
+    def _tone(self, hz, dur):
+        if self.active:
+            lgpio.gpio_write(self.h, self.pin, 1)
+        else:
+            lgpio.tx_pwm(self.h, self.pin, hz, 50)
+        time.sleep(dur)
+        if self.active:
+            lgpio.gpio_write(self.h, self.pin, 0)
+        else:
+            lgpio.tx_pwm(self.h, self.pin, 0, 0)
+
+    def _play(self, notes):
+        with self._lock:  # 연타해도 소리가 겹치지 않게
+            for hz, dur, gap in notes:
+                self._tone(hz, dur)
+                time.sleep(gap)
+
+    def play(self, notes):
+        threading.Thread(target=self._play, args=(notes,), daemon=True).start()
+
+    def temp(self, temp_c):
+        """설정온도 음 한 번. 끝 온도(18/30)는 두 번 울려서 '더 못 내려/올려' 느낌."""
+        hz = self.freq(temp_c)
+        n = 2 if temp_c in (18, 30) else 1
+        self.play([(hz, 0.12, 0.06)] * n)
+
+    def hello(self):
+        """시작음: 도-미-솔."""
+        self.play([(self.freq(t), 0.08, 0.02) for t in (18, 22, 25)])
+
+    def close(self):
+        try:
+            if not self.active:
+                lgpio.tx_pwm(self.h, self.pin, 0, 0)
+            lgpio.gpio_write(self.h, self.pin, 0)
+            lgpio.gpio_free(self.h, self.pin)
+        except lgpio.error:
+            pass
+
+
 class IRReceiver:
     def __init__(self, pin):
         self.pin = pin
@@ -233,6 +293,10 @@ def main():
     ap.add_argument("--ir-pin", type=int, default=18)
     ap.add_argument("--no-lcd", action="store_true")
     ap.add_argument("--all", action="store_true", help="범위 밖/다른 프로토콜 신호도 표시")
+    ap.add_argument("--buzzer-pin", type=int, default=23,
+                    help="피에조 부저 GPIO (기본 23 = 16번 핀, -1 이면 끔)")
+    ap.add_argument("--buzzer-active", action="store_true",
+                    help="능동 부저(전원만 주면 삑)일 때. 기본은 수동 부저(음 높이 변화)")
     ap.add_argument("--raw", action="store_true", help="터미널에 엣지 간격(µs) 전체 출력")
     ap.add_argument("--lcd-dc", type=int, default=24)
     ap.add_argument("--lcd-rst", type=int, default=25)
@@ -257,6 +321,13 @@ def main():
 
     ir = IRReceiver(args.ir_pin)
     state = StateFile(args.ir_pin)
+    buzzer = None
+    if args.buzzer_pin >= 0:
+        try:
+            buzzer = Buzzer(ir.h, args.buzzer_pin, args.buzzer_active)
+            buzzer.hello()
+        except lgpio.error as e:
+            print("[부저] GPIO%d 사용 안 함:" % args.buzzer_pin, e)
     scr = Screen(lcd)
     next_draw = 0.0
     print("버튼을 눌러보세요 (Ctrl+C 종료)")
@@ -271,6 +342,8 @@ def main():
                           % (result["code"], result["data"], ac_temp(result["v"])))
                     scr.push(result)
                     state.record(result)
+                    if buzzer:
+                        buzzer.temp(ac_temp(result["v"]))
                 elif args.all and result:
                     print("  (무시) [%s] %s  %s  (엣지 %d)" % (result["proto"], result["code"],
                                                             result["data"], len(frame)))
@@ -283,6 +356,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        if buzzer:
+            buzzer.close()  # 같은 gpiochip 핸들을 쓰므로 ir.close() 보다 먼저
         ir.close()
         state.close()
         if lcd:
