@@ -2,6 +2,8 @@
 
 수신기(VS1838B 등) OUT → GPIO18 (기본, --ir-pin 으로 변경)
 피에조 부저 + → GPIO23 (16번 핀), - → GND  (기본, --buzzer-pin 으로 변경, -1 이면 끔)
+  삑사리 없이 깨끗하게: + 를 GPIO12(32번 핀)로 옮기고 --buzzer-pin 12 → 하드웨어 PWM
+  (config.txt 에 dtoverlay=pwm-2chan,pin=12,func=4,pin2=13,func2=4 필요)
   설정온도를 음 높이로 알려줌: 18°C=도 … 30°C=한 옥타브 위 도
 
 ※ st7735.py 기본 배선에서 LCD 백라이트(BL)도 GPIO18 이라 핀이 겹칩니다.
@@ -141,25 +143,100 @@ def analyze(frame):
 
 
 # ---------------- IR 수신 ----------------
+class HardwarePWM:
+    """커널 하드웨어 PWM(/sys/class/pwm). 소프트웨어 PWM 과 달리 CPU 가 바빠도 파형이 안 흔들림.
+
+    GPIO12/13 만 지원 (채널 0/1, 파이4 이하·파이5 공통). /boot/firmware/config.txt 에
+        dtoverlay=pwm-2chan,pin=12,func=4,pin2=13,func2=4
+    를 넣고 재부팅해야 /sys/class/pwm/pwmchip* 가 생김.
+    """
+
+    CHANNEL = {12: 0, 13: 1}
+
+    def __init__(self, pin):
+        import glob
+        if pin not in self.CHANNEL:
+            raise ValueError("하드웨어 PWM 은 GPIO12/13 만")
+        self.ch = self.CHANNEL[pin]
+        for chip in sorted(glob.glob("/sys/class/pwm/pwmchip*")):
+            try:
+                if int(open(chip + "/npwm").read()) > self.ch:
+                    self.chip = chip
+                    break
+            except OSError:
+                pass
+        else:
+            raise OSError("/sys/class/pwm 없음 → config.txt 에 dtoverlay=pwm-2chan 추가 후 재부팅")
+        self.dir = "%s/pwm%d" % (self.chip, self.ch)
+        if not os.path.exists(self.dir):
+            self._w(self.chip + "/export", self.ch)
+            for _ in range(50):  # udev 가 권한을 잡을 때까지 잠깐 대기
+                if os.access(self.dir + "/period", os.W_OK):
+                    break
+                time.sleep(0.02)
+
+    @staticmethod
+    def _w(path, v):
+        with open(path, "w") as f:
+            f.write(str(v))
+
+    def tone(self, hz):
+        period = int(1e9 / hz)
+        self._w(self.dir + "/enable", 0)
+        self._w(self.dir + "/duty_cycle", 0)  # period 를 줄이기 전에 duty 부터 0 (duty>period 면 거부됨)
+        self._w(self.dir + "/period", period)
+        self._w(self.dir + "/duty_cycle", period // 2)
+        self._w(self.dir + "/enable", 1)
+
+    def off(self):
+        self._w(self.dir + "/enable", 0)
+
+    def close(self):
+        try:
+            self.off()
+            self._w(self.chip + "/unexport", self.ch)
+        except OSError:
+            pass
+
+
 class Buzzer:
     """피에조 부저로 설정온도를 소리로 알림. 18°C=도(C5) … 30°C=한 옥타브 위 도(C6), 1도에 반음씩.
 
     수동(passive) 부저: PWM 주파수로 음 높이가 바뀜 (기본).
     능동(active) 부저: 전원만 주면 고정음 → 음 높이 대신 짧게 한 번 삑.
     IR 수신을 막지 않도록 소리는 별도 스레드에서 냄.
+
+    삑사리 대책:
+      - lgpio 소프트웨어 PWM 은 CPU 가 바쁘면(LCD 그리기 등) 파형이 흔들려 음이 갈라짐.
+        → 소리 나는 동안 `busy` 를 세워서 메인 루프가 LCD 애니메이션을 잠깐 쉬게 함.
+      - GPIO12/13 에 연결하면 하드웨어 PWM 을 써서 근본적으로 해결 (HardwarePWM 참고).
     """
 
     BASE_HZ = 523.25  # C5 = 18°C
 
     def __init__(self, h, pin, active=False):
         self.h, self.pin, self.active = h, pin, active
-        lgpio.gpio_claim_output(h, pin, 0)
+        self.hw = None
+        self.busy = threading.Event()
         self._lock = threading.Lock()
+        if not active and pin in HardwarePWM.CHANNEL:
+            try:
+                self.hw = HardwarePWM(pin)
+                print("[부저] GPIO%d 하드웨어 PWM 사용" % pin)
+                return
+            except (OSError, ValueError) as e:
+                print("[부저] 하드웨어 PWM 실패, 소프트웨어 PWM 으로:", e)
+        lgpio.gpio_claim_output(h, pin, 0)
 
     def freq(self, temp_c):
         return self.BASE_HZ * 2 ** ((temp_c - 18) / 12)
 
     def _tone(self, hz, dur):
+        if self.hw:
+            self.hw.tone(hz)
+            time.sleep(dur)
+            self.hw.off()
+            return
         if self.active:
             lgpio.gpio_write(self.h, self.pin, 1)
         else:
@@ -172,9 +249,13 @@ class Buzzer:
 
     def _play(self, notes):
         with self._lock:  # 연타해도 소리가 겹치지 않게
-            for hz, dur, gap in notes:
-                self._tone(hz, dur)
-                time.sleep(gap)
+            self.busy.set()
+            try:
+                for hz, dur, gap in notes:
+                    self._tone(hz, dur)
+                    time.sleep(gap)
+            finally:
+                self.busy.clear()
 
     def play(self, notes):
         threading.Thread(target=self._play, args=(notes,), daemon=True).start()
@@ -190,6 +271,9 @@ class Buzzer:
         self.play([(self.freq(t), 0.08, 0.02) for t in (18, 22, 25)])
 
     def close(self):
+        if self.hw:
+            self.hw.close()
+            return
         try:
             if not self.active:
                 lgpio.tx_pwm(self.h, self.pin, 0, 0)
@@ -349,7 +433,9 @@ def main():
                                                             result["data"], len(frame)))
                 if args.raw:
                     print("   ", frame)
-            if time.monotonic() >= next_draw:  # 애니메이션 ~20fps (안 바뀐 프레임은 전송 안 함)
+            # 소프트웨어 PWM 으로 소리 나는 중엔 LCD 를 쉬어서 CPU 를 양보 (삑사리 방지)
+            quiet = buzzer and not buzzer.hw and buzzer.busy.is_set()
+            if not quiet and time.monotonic() >= next_draw:  # 애니메이션 ~20fps (안 바뀐 프레임은 전송 안 함)
                 scr.draw()
                 next_draw = time.monotonic() + 0.05
             time.sleep(0.01)
