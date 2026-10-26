@@ -237,9 +237,20 @@ class WindowsScanTests(unittest.TestCase):
         self.assertIn("Initio 칩 — USB↔SATA 브릿지 (NVMe 케이스 칩 아님)", text)
         self.assertIn("장치 ID   : USB\\VID_13FD", text)
         self.assertIn("[USB 인식 실패] 알 수 없는 USB 장치(장치 설명자 요청 실패)", text)
+        self.assertIn("PC 가 인식하지 못한 USB 장치가 있습니다", text)
+        self.assertIn("SSD 를 빼고 케이스만 꽂아 보기", text)
+        self.assertNotIn("케이스(브릿지)는 살아 있지만", text)  # 인식 실패가 있으면 오해를 부르는 안내는 생략
+        self.assertIn("연결: SATA", text)
+
+    def test_scan_hints_without_enumeration_failure(self):
+        def ps(cmd):
+            rows = self.fake_ps(cmd)
+            return [r for r in rows if "VID_0000" not in r.get("DeviceID", "")]
+        with mock.patch.object(nh, "_powershell_json", ps):
+            text = nh.format_scan(nh.scan_windows())
         self.assertIn("USB 디스크가 하나도 보이지 않습니다", text)
         self.assertIn("알려진 USB-NVMe 브릿지", text)
-        self.assertIn("연결: SATA", text)
+        self.assertNotIn("인식하지 못한", text)
 
 
 if __name__ == "__main__":

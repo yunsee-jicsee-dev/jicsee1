@@ -1340,16 +1340,25 @@ def format_scan(items: list[dict]) -> str:
             L.append(f"    펌웨어: {it.get('firmware', '')}   크기: {it.get('size', '')}"
                      + (f"   연결: {it['transport']}" if it.get("transport") else ""))
     usb_storage = [it for it in items if it["kind"] == "usb"]
+    usb_fail = [it for it in items if it["kind"] == "usb_fail"]
     usb_disks = [it for it in items if it["kind"] in ("disk", "nvme") and it.get("transport", "").lower() == "usb"]
-    if usb_storage and not usb_disks:
-        L.append("")
-        L.append("※ USB 저장장치는 연결돼 있는데 USB 디스크가 하나도 보이지 않습니다.")
-        L.append("  케이스(브릿지)는 살아 있지만 안의 SSD/디스크를 찾지 못하는 상태입니다 (Windows: '미디어 없음').")
-        L.append("  SSD 장착 상태, 케이스 펌웨어, 또는 SSD 고장을 의심하세요.")
-    if not any(it.get("bridge", "").startswith(("Realtek", "JMicron", "ASMedia")) for it in usb_storage):
-        if usb_storage:
-            L.append("※ 알려진 USB-NVMe 브릿지(Realtek 0BDA / JMicron 152D / ASMedia 174C)가 없습니다.")
-            L.append("  NVMe 케이스를 뺐다 꽂아 보고, 목록에서 사라지는 항목이 케이스입니다.")
+    nvme_bridges = [it for it in usb_storage if it.get("bridge", "").startswith(("Realtek", "JMicron", "ASMedia"))]
+    if usb_fail:
+        L += ["",
+              "※ PC 가 인식하지 못한 USB 장치가 있습니다. NVMe 케이스가 목록에 없다면 이것이 케이스일 가능성이 큽니다.",
+              "  (USB 3 에서 실패하면 USB 2 로 다시 시도하므로 한 장치가 두 줄로 보이기도 합니다)",
+              "  케이스 칩이 시작조차 못 하는 상태입니다. 확인 순서:",
+              "   1) 케이스를 뽑고 다시 scan — 사라지는 항목이 케이스",
+              "   2) 다른 케이블(케이스 동봉 케이블)·메인보드 뒷면 포트로 바꿔 보기 (허브·앞면 포트 X)",
+              "   3) SSD 를 빼고 케이스만 꽂아 보기 — 이때 정상 인식되면 SSD 쪽 문제, 그래도 실패면 케이스 고장"]
+    elif usb_storage and not usb_disks:
+        L += ["",
+              "※ USB 저장장치는 연결돼 있는데 USB 디스크가 하나도 보이지 않습니다.",
+              "  케이스(브릿지)는 살아 있지만 안의 SSD/디스크를 찾지 못하는 상태입니다 (Windows: '미디어 없음').",
+              "  SSD 장착 상태, 케이스 규격(NVMe/SATA) 불일치, 케이스 펌웨어, 또는 SSD 고장을 의심하세요."]
+    if usb_storage and not nvme_bridges and not usb_fail:
+        L += ["※ 알려진 USB-NVMe 브릿지(Realtek 0BDA / JMicron 152D / ASMedia 174C)가 없습니다.",
+              "  NVMe 케이스를 뺐다 꽂아 보고, 목록에서 사라지는 항목이 케이스입니다."]
     return "\n".join(L)
 
 
