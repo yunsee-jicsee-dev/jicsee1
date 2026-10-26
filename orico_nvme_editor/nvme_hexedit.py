@@ -61,7 +61,8 @@ ANALYZE_LIMIT = 64 << 20     # 펌웨어 분석에 쓰는 최대 크기
 # 브릿지 칩 정보
 # ---------------------------------------------------------------------------
 
-BRIDGE_VENDORS = {0x0BDA: "Realtek", 0x152D: "JMicron", 0x174C: "ASMedia"}
+BRIDGE_VENDORS = {0x0BDA: "Realtek", 0x152D: "JMicron", 0x174C: "ASMedia", 0x13FD: "Initio"}
+SATA_ONLY_VENDORS = {0x13FD}  # USB↔SATA/PATA 브릿지만 만드는 회사 (NVMe 케이스 칩이 아님)
 
 KNOWN_BRIDGES = {
     (0x0BDA, 0x9210): "Realtek RTL9210 / RTL9210B (USB ↔ NVMe/SATA)",
@@ -84,6 +85,8 @@ VENDOR_KEYWORDS = [b"Realtek", b"JMicron", b"ASMedia", b"ORICO"]
 def bridge_label(vid: int, pid: int) -> str:
     if (vid, pid) in KNOWN_BRIDGES:
         return KNOWN_BRIDGES[(vid, pid)]
+    if vid in SATA_ONLY_VENDORS:
+        return f"{BRIDGE_VENDORS[vid]} 칩 — USB↔SATA 브릿지 (NVMe 케이스 칩 아님)"
     if vid in BRIDGE_VENDORS:
         return f"{BRIDGE_VENDORS[vid]} 칩 (모델 미확인)"
     return ""
@@ -1263,12 +1266,17 @@ def scan_windows() -> list[dict]:
     prefix = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
     usb = _powershell_json(prefix + "Get-CimInstance Win32_PnPEntity | "
                            "Where-Object { $_.DeviceID -like 'USB\\VID_*' } | "
-                           "Select-Object DeviceID,Name,Service,HardwareID | ConvertTo-Json -Compress")
+                           "Select-Object DeviceID,Name,Service,HardwareID,ConfigManagerErrorCode | "
+                           "ConvertTo-Json -Compress")
     for d in usb:
         m = re.search(r"VID_([0-9A-F]{4})&PID_([0-9A-F]{4})", d.get("DeviceID") or "", re.I)
         if not m:
             continue
         vid, pid = int(m.group(1), 16), int(m.group(2), 16)
+        if vid == 0:  # "알 수 없는 USB 장치 (장치 설명자 요청 실패)" 등: 연결은 됐지만 자기소개(열거)에 실패
+            items.append({"kind": "usb_fail", "path": d.get("DeviceID", ""), "name": d.get("Name") or "",
+                          "error": _as_int(d.get("ConfigManagerErrorCode"))})
+            continue
         service = d.get("Service") or ""
         if service.lower() not in ("usbstor", "uaspstor") and (vid, pid) not in KNOWN_BRIDGES:
             continue
@@ -1280,7 +1288,8 @@ def scan_windows() -> list[dict]:
                 break
         items.append({"kind": "usb", "path": d.get("DeviceID", ""), "name": d.get("Name") or "",
                       "vid": f"{vid:04X}", "pid": f"{pid:04X}", "firmware": rev,
-                      "bridge": bridge_label(vid, pid), "driver": service})
+                      "bridge": bridge_label(vid, pid), "driver": service,
+                      "error": _as_int(d.get("ConfigManagerErrorCode"))})
     disks = _powershell_json(prefix + "Get-PhysicalDisk | Select-Object DeviceId,FriendlyName,BusType,"
                              "FirmwareVersion,Size | ConvertTo-Json -Compress")
     for d in disks:
@@ -1305,10 +1314,15 @@ def scan_devices() -> list[dict]:
 def format_scan(items: list[dict]) -> str:
     if not items:
         return "USB 저장장치 / NVMe 장치를 찾지 못했습니다."
-    kinds = {"usb": "USB 브릿지", "nvme": "NVMe", "disk": "디스크"}
+    kinds = {"usb": "USB 브릿지", "usb_fail": "USB 인식 실패", "nvme": "NVMe", "disk": "디스크"}
     L = []
     for it in items:
         head = f"[{kinds.get(it['kind'], it['kind'])}] "
+        if it["kind"] == "usb_fail":
+            L.append(head + it["name"])
+            L.append("    → 케이스가 연결은 됐지만 PC 에 자기소개(열거)를 못 하고 있습니다.")
+            L.append("      전원·케이블·포트 문제이거나 브릿지 펌웨어가 손상됐을 수 있습니다.")
+            continue
         if it["kind"] == "usb":
             L.append(head + f"{it['vid']}:{it['pid']}  {it['name']}")
             if it.get("bridge"):
@@ -1316,12 +1330,26 @@ def format_scan(items: list[dict]) -> str:
             L.append(f"    REV(bcdDevice): {it['firmware']}  ← 대부분 브릿지 펌웨어 버전")
             L.append(f"    드라이버  : {it.get('driver', '')}"
                      + (f"   속도: {it['speed']}" if it.get("speed") else ""))
+            if it.get("error"):
+                L.append(f"    장치 오류 : 코드 {it['error']} (장치 관리자에 느낌표로 표시됨)")
             if it.get("path"):
-                L.append(f"    디스크    : {it['path']}")
+                label = "장치 ID   " if it["path"].upper().startswith("USB\\") else "디스크    "
+                L.append(f"    {label}: {it['path']}")
         else:
             L.append(head + f"{it['path']}  {it['name']}")
             L.append(f"    펌웨어: {it.get('firmware', '')}   크기: {it.get('size', '')}"
                      + (f"   연결: {it['transport']}" if it.get("transport") else ""))
+    usb_storage = [it for it in items if it["kind"] == "usb"]
+    usb_disks = [it for it in items if it["kind"] in ("disk", "nvme") and it.get("transport", "").lower() == "usb"]
+    if usb_storage and not usb_disks:
+        L.append("")
+        L.append("※ USB 저장장치는 연결돼 있는데 USB 디스크가 하나도 보이지 않습니다.")
+        L.append("  케이스(브릿지)는 살아 있지만 안의 SSD/디스크를 찾지 못하는 상태입니다 (Windows: '미디어 없음').")
+        L.append("  SSD 장착 상태, 케이스 펌웨어, 또는 SSD 고장을 의심하세요.")
+    if not any(it.get("bridge", "").startswith(("Realtek", "JMicron", "ASMedia")) for it in usb_storage):
+        if usb_storage:
+            L.append("※ 알려진 USB-NVMe 브릿지(Realtek 0BDA / JMicron 152D / ASMedia 174C)가 없습니다.")
+            L.append("  NVMe 케이스를 뺐다 꽂아 보고, 목록에서 사라지는 항목이 케이스입니다.")
     return "\n".join(L)
 
 
@@ -3203,7 +3231,7 @@ class DeviceScanWindow:
                 self.info.set(f"검색 실패: {result['error']}")
                 return
             self.items = result["items"]
-            kinds = {"usb": "USB 브릿지", "nvme": "NVMe", "disk": "디스크"}
+            kinds = {"usb": "USB 브릿지", "usb_fail": "USB 인식 실패", "nvme": "NVMe", "disk": "디스크"}
             for i, it in enumerate(self.items):
                 vidpid = f"{it['vid']}:{it['pid']}" if it.get("vid") else ""
                 self.tree.insert("", "end", iid=str(i), values=(
@@ -3219,7 +3247,7 @@ class DeviceScanWindow:
             return None
         it = self.items[int(sel[0])]
         path = it.get("path", "").split(",")[0].strip()
-        if it["kind"] == "usb" and not path.startswith(("/dev/", "\\\\.\\")):
+        if it["kind"] in ("usb", "usb_fail") and not path.startswith(("/dev/", "\\\\.\\")):
             messagebox.showinfo("장치", "USB 브릿지 항목은 디스크 경로가 아닙니다.\n"
                                         "같은 크기의 '디스크' 항목을 선택하세요.", parent=self.win)
             return None

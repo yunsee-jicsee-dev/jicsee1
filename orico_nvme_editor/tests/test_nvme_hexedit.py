@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 import zlib
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import nvme_hexedit as nh  # noqa: E402
@@ -210,6 +211,35 @@ class CliTests(TmpDirTest):
             self.skipTest("Linux sysfs 전용")
         code, _ = self.run_cli("scan")
         self.assertEqual(code, 0)
+
+
+class WindowsScanTests(unittest.TestCase):
+    """사용자가 보고한 Windows 결과(Initio 13FD:0840 + 내장 HDD)를 재현."""
+
+    def fake_ps(self, cmd):
+        if "Win32_PnPEntity" in cmd:
+            return [{"DeviceID": "USB\\VID_13FD&PID_0840\\000000000000000000000000", "Name": "USB 대용량 저장 장치",
+                     "Service": "USBSTOR", "HardwareID": ["USB\\VID_13FD&PID_0840&REV_0114"],
+                     "ConfigManagerErrorCode": 0},
+                    {"DeviceID": "USB\\VID_0000&PID_0002\\5&1A2B3C&0&3",
+                     "Name": "알 수 없는 USB 장치(장치 설명자 요청 실패)", "Service": None, "HardwareID": None,
+                     "ConfigManagerErrorCode": 43},
+                    {"DeviceID": "USB\\VID_046D&PID_C52B\\5&2", "Name": "USB 수신기", "Service": "usbccgp",
+                     "HardwareID": [], "ConfigManagerErrorCode": 0}]
+        return [{"DeviceId": "0", "FriendlyName": "WDC WD20EZBX-00AYRA0", "BusType": 11,
+                 "FirmwareVersion": "01.01A01", "Size": 2000398934016}]
+
+    def test_scan_windows_diagnostics(self):
+        with mock.patch.object(nh, "_powershell_json", self.fake_ps):
+            items = nh.scan_windows()
+        self.assertEqual([it["kind"] for it in items], ["usb", "usb_fail", "disk"])
+        text = nh.format_scan(items)
+        self.assertIn("Initio 칩 — USB↔SATA 브릿지 (NVMe 케이스 칩 아님)", text)
+        self.assertIn("장치 ID   : USB\\VID_13FD", text)
+        self.assertIn("[USB 인식 실패] 알 수 없는 USB 장치(장치 설명자 요청 실패)", text)
+        self.assertIn("USB 디스크가 하나도 보이지 않습니다", text)
+        self.assertIn("알려진 USB-NVMe 브릿지", text)
+        self.assertIn("연결: SATA", text)
 
 
 if __name__ == "__main__":
