@@ -23,17 +23,20 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import errno
 import hashlib
 import json
 import os
 import re
 import shutil
+import signal
 import stat
 import struct
 import subprocess
 import sys
 import threading
 import time
+import uuid
 import zlib
 from dataclasses import asdict, dataclass
 
@@ -50,6 +53,7 @@ APP_NAME = "ORICO NVMe 바이너리 에디터"
 
 IS_WINDOWS = os.name == "nt"
 DEVICE_ALIGN = 4096          # 디스크 읽기/쓰기 정렬 단위 (512B·4Kn 섹터 모두 호환)
+SECTOR = 512                 # 파일/이미지의 불량 섹터 추적 단위
 CHUNK = 1 << 20              # 검색·복사 시 한 번에 읽는 크기
 ANALYZE_LIMIT = 64 << 20     # 펌웨어 분석에 쓰는 최대 크기
 
@@ -105,6 +109,14 @@ def parse_int(text: str) -> int:
     return int(text, 0)
 
 
+def parse_size(text: str) -> int:
+    """'512G', '1T', '0x100000', '4096' 같은 크기 표기 (K/M/G/T 는 1024 단위)."""
+    m = re.fullmatch(r"\s*([0-9.]+)\s*([KMGT])i?B?\s*", text, re.IGNORECASE)
+    if m:
+        return int(float(m.group(1)) * 1024 ** ("KMGT".index(m.group(2).upper()) + 1))
+    return parse_int(text)
+
+
 def parse_hex_bytes(text: str) -> bytes:
     cleaned = re.sub(r"[\s:,\-]|0x", "", text.strip(), flags=re.IGNORECASE)
     if not cleaned or len(cleaned) % 2 or not re.fullmatch(r"[0-9A-Fa-f]+", cleaned):
@@ -112,12 +124,15 @@ def parse_hex_bytes(text: str) -> bytes:
     return bytes.fromhex(cleaned)
 
 
-def hexdump_lines(data: bytes, base: int = 0):
+def hexdump_lines(data: bytes, base: int = 0, bad: set[int] | None = None):
+    """bad: 읽기 실패한 바이트의 절대 오프셋 집합 → '??' 로 표시."""
     width = 8 if base + len(data) <= 0xFFFFFFFF else 12
+    bad = bad or set()
     for i in range(0, len(data), 16):
         chunk = data[i:i + 16]
-        hexpart = " ".join(f"{b:02X}" for b in chunk).ljust(47)
-        asc = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+        offs = range(base + i, base + i + len(chunk))
+        hexpart = " ".join("??" if o in bad else f"{b:02X}" for o, b in zip(offs, chunk)).ljust(47)
+        asc = "".join("?" if o in bad else (chr(b) if 32 <= b < 127 else ".") for o, b in zip(offs, chunk))
         yield f"{base + i:0{width}X}  {hexpart}  |{asc}|"
 
 
@@ -436,7 +451,7 @@ def is_device_path(path: str) -> bool:
         return False
 
 
-def _win_disk_length(path: str) -> int:
+def _win_ioctl(path: str, code: int, out_size: int) -> bytes:
     import ctypes
     from ctypes import wintypes
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -451,25 +466,106 @@ def _win_disk_length(path: str) -> int:
     if handle in (None, wintypes.HANDLE(-1).value):
         raise ctypes.WinError(ctypes.get_last_error())
     try:
-        length = ctypes.c_longlong(0)
+        buf = ctypes.create_string_buffer(out_size)
         returned = wintypes.DWORD(0)
-        ok = k32.DeviceIoControl(handle, 0x0007405C,  # IOCTL_DISK_GET_LENGTH_INFO
-                                 None, 0, ctypes.byref(length), 8, ctypes.byref(returned), None)
-        if not ok:
+        if not k32.DeviceIoControl(handle, code, None, 0, buf, out_size, ctypes.byref(returned), None):
             raise ctypes.WinError(ctypes.get_last_error())
-        return length.value
+        return buf.raw[:returned.value]
     finally:
         k32.CloseHandle(handle)
 
 
 def device_size(path: str) -> int:
     if IS_WINDOWS:
-        return _win_disk_length(path)
+        return struct.unpack_from("<q", _win_ioctl(path, 0x0007405C, 8))[0]  # IOCTL_DISK_GET_LENGTH_INFO
     fd = os.open(path, os.O_RDONLY)
     try:
         return os.lseek(fd, 0, os.SEEK_END)
     finally:
         os.close(fd)
+
+
+def device_sector_size(path: str) -> int:
+    """논리 섹터 크기 (512 또는 4096). 알 수 없으면 512."""
+    try:
+        if IS_WINDOWS:
+            # IOCTL_DISK_GET_DRIVE_GEOMETRY_EX → DISK_GEOMETRY.BytesPerSector (오프셋 20)
+            value = struct.unpack_from("<I", _win_ioctl(path, 0x000700A0, 256), 20)[0]
+        else:
+            import fcntl
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                value = struct.unpack("i", fcntl.ioctl(fd, 0x1268, b"\0" * 4))[0]  # BLKSSZGET
+            finally:
+                os.close(fd)
+        return value if value in (512, 1024, 2048, 4096) else SECTOR
+    except Exception:
+        return SECTOR
+
+
+class RangeSet:
+    """겹치거나 붙은 구간을 합쳐서 보관하는 [시작, 끝) 구간 집합 (불량 섹터 기록용).
+
+    백그라운드 읽기 스레드와 화면 스레드가 함께 쓰므로 자체 잠금을 둔다."""
+
+    def __init__(self, ranges=()):
+        self._starts: list[int] = []
+        self._ends: list[int] = []
+        self._lock = threading.Lock()
+        for s, e in ranges:
+            self.add(s, e)
+
+    def add(self, s: int, e: int):
+        if e <= s:
+            return
+        with self._lock:
+            i = bisect.bisect_left(self._ends, s)
+            j = i
+            while j < len(self._starts) and self._starts[j] <= e:
+                s, e = min(s, self._starts[j]), max(e, self._ends[j])
+                j += 1
+            self._starts[i:j] = [s]
+            self._ends[i:j] = [e]
+
+    def remove(self, s: int, e: int):
+        with self._lock:
+            kept = []
+            for a, b in zip(self._starts, self._ends):
+                if b <= s or a >= e:
+                    kept.append((a, b))
+                else:
+                    if a < s:
+                        kept.append((a, s))
+                    if b > e:
+                        kept.append((e, b))
+            self._starts = [a for a, _ in kept]
+            self._ends = [b for _, b in kept]
+
+    def overlaps(self, s: int, e: int) -> list[tuple[int, int]]:
+        """[s, e) 와 겹치는 부분들 (잘라서 반환)."""
+        with self._lock:
+            out = []
+            i = bisect.bisect_right(self._ends, s)
+            while i < len(self._starts) and self._starts[i] < e:
+                out.append((max(s, self._starts[i]), min(e, self._ends[i])))
+                i += 1
+            return out
+
+    def next_after(self, off: int) -> int | None:
+        with self._lock:
+            i = bisect.bisect_right(self._starts, off)
+            return self._starts[i] if i < len(self._starts) else None
+
+    def ranges(self) -> list[tuple[int, int]]:
+        with self._lock:
+            return list(zip(self._starts, self._ends))
+
+    def total(self) -> int:
+        with self._lock:
+            return sum(e - s for s, e in zip(self._starts, self._ends))
+
+    def __len__(self) -> int:
+        return len(self._starts)
 
 
 def make_backup(path: str) -> str:
@@ -488,21 +584,55 @@ def access_hint(exc: Exception) -> str:
     return ""
 
 
+def rescue_map_path(image_path: str) -> str:
+    return image_path + ".rescue.json"
+
+
 class ByteSource:
-    def __init__(self, path: str, allow_device_write: bool = False):
+    """파일/디스크를 연다. size 를 주면 용량 인식이 안 되는 고장 디스크도 그 크기로 연다.
+
+    읽다가 실패한 섹터는 0으로 채우고 self.bad 에 기록한 뒤 계속 진행한다(고장 디스크 탐색용).
+    한 번 실패한 섹터는 다시 읽지 않으므로 같은 곳을 볼 때마다 오래 멈추지 않는다."""
+
+    def __init__(self, path: str, allow_device_write: bool = False, size: int | None = None):
         self.path = normalize_device_path(path)
         self.is_device = is_device_path(self.path)
-        self.align = DEVICE_ALIGN if self.is_device else 1
-        self.size = device_size(self.path) if self.is_device else os.path.getsize(self.path)
+        self.sector = device_sector_size(self.path) if self.is_device else SECTOR
+        self.align = max(DEVICE_ALIGN, self.sector) if self.is_device else 1
+        if size is not None:
+            self.size = size
+        else:
+            self.size = device_size(self.path) if self.is_device else os.path.getsize(self.path)
         self.writable = (not self.is_device) or allow_device_write
         self.patches: dict[int, int] = {}
         self._sorted: list[int] | None = None
+        self.bad = RangeSet()
+        self.retries = 0
+        self.rescue_info: dict | None = None
+        self._lock = threading.RLock()
         self._fh = open(self.path, "rb", buffering=0)
+        if not self.is_device:
+            self._load_rescue_map()
+
+    def _load_rescue_map(self):
+        """복구 이미지 옆의 .rescue.json 이 있으면 못 읽은 구간을 불량으로 표시."""
+        try:
+            with open(rescue_map_path(self.path), encoding="utf-8") as f:
+                info = json.load(f)
+            base = int(info["offset"])
+            for s, e in list(info.get("bad", [])) + list(info.get("pending", [])):
+                self.bad.add(max(0, s - base), min(self.size, e - base))
+            if int(info.get("pos", base + self.size)) < base + self.size:  # 아직 복사 안 한 뒷부분
+                self.bad.add(int(info["pos"]) - base, self.size)
+            self.sector = int(info.get("sector", SECTOR))
+            self.rescue_info = info
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
 
     def close(self):
-        if self._fh:
-            self._fh.close()
-            self._fh = None
+        fh, self._fh = self._fh, None
+        if fh:
+            fh.close()
 
     # --- 읽기 ---
     def _read_fully(self, n: int) -> bytes:
@@ -515,19 +645,66 @@ class ByteSource:
             got += len(b)
         return b"".join(parts)
 
+    def _pread(self, start: int, n: int) -> bytes:
+        """정확히 n 바이트를 읽거나 OSError (짧게 읽혀도 오류로 본다)."""
+        if self._fh is None:
+            raise OSError(errno.EBADF, "닫힌 장치")
+        self._fh.seek(start)
+        data = self._read_fully(n)
+        if len(data) != n:
+            raise OSError(errno.EIO, f"0x{start:X} 에서 {n}바이트 중 {len(data)}바이트만 읽힘")
+        return data
+
+    def read_strict(self, offset: int, length: int) -> bytes:
+        """오류를 그대로 올려보내는 읽기 (복구 이미지용). offset/length 는 섹터 정렬."""
+        with self._lock:
+            return self._pread(offset, length)
+
+    def _read_tolerant(self, start: int, end: int) -> bytearray:
+        """섹터 단위로 읽고, 실패한 섹터는 0으로 채워 self.bad 에 기록."""
+        out = bytearray()
+        pos = start
+        while pos < end:
+            n = min(self.sector, end - pos)
+            data = None
+            if not self.bad.overlaps(pos, pos + n):
+                for _ in range(self.retries + 1):
+                    try:
+                        data = self._pread(pos, n)
+                        break
+                    except OSError:
+                        data = None
+                if data is None:
+                    self.bad.add(pos, pos + n)
+            out += data if data is not None else bytes(n)
+            pos += n
+        return out
+
     def read_raw(self, offset: int, length: int) -> bytes:
         if offset < 0 or offset >= self.size or length <= 0:
             return b""
         length = min(length, self.size - offset)
-        if self.align == 1:
-            self._fh.seek(offset)
-            return self._read_fully(length)
         start = offset - offset % self.align
         end = offset + length
         end = min(end + (-end) % self.align, self.size)
-        self._fh.seek(start)
-        buf = self._read_fully(end - start)
-        return buf[offset - start:offset - start + length]
+        with self._lock:
+            buf = None
+            if not self.bad.overlaps(start, end):
+                try:
+                    buf = self._pread(start, end - start)
+                except OSError:
+                    buf = None
+            if buf is None:  # 오류 → 섹터 단위로 다시 읽으며 불량 섹터만 건너뜀
+                s0 = start - start % self.sector
+                e0 = min(end + (-end) % self.sector, self.size)
+                buf = self._read_tolerant(s0, e0)[start - s0:]
+        return bytes(buf[offset - start:offset - start + length])
+
+    def bad_offsets(self, start: int, end: int) -> set[int]:
+        out: set[int] = set()
+        for s, e in self.bad.overlaps(start, end):
+            out.update(range(s, e))
+        return out
 
     def read(self, offset: int, length: int) -> bytearray:
         buf = bytearray(self.read_raw(offset, length))
@@ -590,6 +767,11 @@ class ByteSource:
         if self.is_device:
             blocks = sorted({k - k % self.align for k in self.patches})
             runs = [(s, min(e, self.size)) for s, e in self._merge_block_runs(blocks)]
+            for s, e in runs:
+                self.read_raw(s, e - s)  # 원본 확인 (실패 시 bad 에 기록됨)
+                if self.bad.overlaps(s, e):
+                    raise OSError(errno.EIO, f"0x{s:X} 블록에 읽기 실패 섹터가 있어 쓰지 않습니다 "
+                                             "(원본을 백업할 수 없음)")
             if backup:
                 stamp = time.strftime("%Y%m%d-%H%M%S")
                 backup_path = os.path.join(os.path.expanduser("~"), "orico-nvme-backups", stamp)
@@ -670,6 +852,316 @@ class ByteSource:
             if progress and progress(pos, self.size) is False:
                 return -1
         return -1
+
+
+# ---------------------------------------------------------------------------
+# 고장 디스크 탐색: 파티션/파일시스템 구조, 시그니처 스캔, 복구 이미지
+# ---------------------------------------------------------------------------
+
+GPT_TYPES = {
+    "C12A7328-F81F-11D2-BA4B-00A0C93EC93B": "EFI 시스템",
+    "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7": "기본 데이터 (Windows)",
+    "E3C9E316-0B5C-4DB8-817D-F92DF00215AE": "Microsoft 예약(MSR)",
+    "DE94BBA4-06D1-4D40-A16A-BFD50179D6AC": "Windows 복구",
+    "0FC63DAF-8483-4772-8E79-3D69D8477DE4": "Linux 파일시스템",
+    "0657FD6D-A4AB-43C4-84E5-0933C84B4F4F": "Linux 스왑",
+    "E6D6D379-F507-44C2-A23C-238F2A3DF928": "Linux LVM",
+    "7C3457EF-0000-11AA-AA11-00306543ECAC": "Apple APFS",
+    "48465300-0000-11AA-AA11-00306543ECAC": "Apple HFS+",
+}
+MBR_TYPES = {0x01: "FAT12", 0x04: "FAT16", 0x05: "확장", 0x06: "FAT16", 0x07: "NTFS/exFAT", 0x0B: "FAT32",
+             0x0C: "FAT32 (LBA)", 0x0E: "FAT16 (LBA)", 0x0F: "확장 (LBA)", 0x82: "Linux 스왑", 0x83: "Linux",
+             0x8E: "Linux LVM", 0xAF: "Apple HFS+", 0xEE: "GPT 보호", 0xEF: "EFI"}
+
+
+def detect_fs(src: ByteSource, off: int) -> str:
+    """off 위치에서 시작하는 파일시스템 종류 (모르면 빈 문자열)."""
+    head = bytes(src.read(off, 4096))
+    if len(head) < 512:
+        return ""
+    if head[3:11] == b"NTFS    ":
+        return "NTFS"
+    if head[3:11] == b"EXFAT   ":
+        return "exFAT"
+    if head[3:11] == b"-FVE-FS-":
+        return "BitLocker 암호화"
+    if head[82:90] == b"FAT32   ":
+        return "FAT32"
+    if head[54:59] in (b"FAT12", b"FAT16"):
+        return head[54:59].decode()
+    if head[:6] == b"LUKS\xba\xbe":
+        return "LUKS 암호화"
+    if head[:4] == b"XFSB":
+        return "XFS"
+    if head[32:36] == b"NXSB":
+        return "APFS"
+    if len(head) >= 1084 and head[1080:1082] == b"\x53\xef":
+        return "ext2/3/4"
+    if head[1024:1026] in (b"H+", b"HX"):
+        return "HFS+"
+    if bytes(src.read(off + 0x10040, 8)) == b"_BHRfS_M":
+        return "Btrfs"
+    return ""
+
+
+def _gpt_header_crc_ok(hdr: bytes) -> bool:
+    hs = struct.unpack_from("<I", hdr, 12)[0]
+    if not 92 <= hs <= len(hdr):
+        return False
+    h = bytearray(hdr[:hs])
+    stored = struct.unpack_from("<I", h, 16)[0]
+    h[16:20] = bytes(4)
+    return zlib.crc32(h) & 0xFFFFFFFF == stored
+
+
+def parse_layout(src: ByteSource) -> list[dict]:
+    """MBR/GPT 와 각 파티션의 파일시스템을 읽어 탐색용 목록을 만든다. 손상 여부도 표시."""
+    items: list[dict] = []
+
+    def add(kind, off, length, label, detail=""):
+        items.append({"kind": kind, "offset": off, "length": length, "label": label, "detail": detail})
+
+    mbr = bytes(src.read(0, 512))
+    fs0 = detect_fs(src, 0)
+    has_mbr = len(mbr) == 512 and mbr[510:512] == b"\x55\xaa" and not fs0
+    gpt_found = False
+    for ss in sorted({src.sector, 512, 4096}):
+        hdr = bytes(src.read(ss, 512))
+        if hdr[:8] != b"EFI PART":
+            continue
+        gpt_found = True
+        _my, alt_lba = struct.unpack_from("<QQ", hdr, 24)
+        ent_lba, n, esz, ent_crc = struct.unpack_from("<QIII", hdr, 72)
+        crc_ok = _gpt_header_crc_ok(hdr)
+        add("gpt", ss, 92, "GPT 헤더 (주)",
+            f"섹터 {ss}B, CRC {'정상' if crc_ok else '손상!'}, 파티션 항목 {n}개, 백업 헤더 LBA {alt_lba}")
+        n = min(n, 1024)
+        esz = esz if 128 <= esz <= 1024 else 128
+        table = bytes(src.read(ent_lba * ss, n * esz))
+        ent_ok = zlib.crc32(table) & 0xFFFFFFFF == ent_crc
+        add("gpt", ent_lba * ss, n * esz, "GPT 파티션 항목", f"CRC {'정상' if ent_ok else '손상!'}")
+        bk_off = alt_lba * ss
+        bk = bytes(src.read(bk_off, 512)) if 0 < bk_off < src.size else b""
+        if bk[:8] == b"EFI PART":
+            add("gpt", bk_off, 92, "GPT 헤더 (백업)", "CRC 정상" if _gpt_header_crc_ok(bk) else "CRC 손상!")
+        else:
+            add("warn", bk_off if 0 < bk_off < src.size else 0, 0, "GPT 백업 헤더 없음",
+                "디스크 끝부분 손상이거나, 케이스가 용량을 잘못 인식하고 있을 수 있음")
+        for i in range(n):
+            e = table[i * esz:i * esz + 128]
+            if len(e) < 128 or e[:16] == bytes(16):
+                continue
+            tguid = str(uuid.UUID(bytes_le=e[:16])).upper()
+            first, last = struct.unpack_from("<QQ", e, 32)
+            name = e[56:128].decode("utf-16-le", "replace").split("\x00")[0]
+            start = first * ss
+            fs = detect_fs(src, start) if start < src.size else ""
+            detail = " / ".join(x for x in (GPT_TYPES.get(tguid, tguid), fs and f"파일시스템 {fs}",
+                                            "" if start < src.size else "디스크 범위 밖!") if x)
+            add("part", start, (last - first + 1) * ss, f"파티션 {i + 1}: {name or GPT_TYPES.get(tguid, '?')}",
+                detail)
+        break
+    if fs0:
+        add("fs", 0, src.size, f"오프셋 0 의 파일시스템: {fs0}", "파티션 테이블 없이 통째로 포맷된 디스크")
+    elif has_mbr:
+        add("mbr", 0, 512, "MBR", "부트 시그니처 55AA 정상")
+        for i in range(4):
+            e = mbr[446 + 16 * i:462 + 16 * i]
+            ptype = e[4]
+            lba, count = struct.unpack_from("<II", e, 8)
+            if ptype == 0 or count == 0:
+                continue
+            if ptype == 0xEE:
+                if not gpt_found:
+                    add("warn", 512, 0, "GPT 보호 MBR 인데 GPT 헤더가 없음",
+                        "GPT 손상 가능 — 백업 GPT(디스크 끝) 나 시그니처 스캔으로 파티션을 찾아보세요")
+                continue
+            if gpt_found:
+                continue
+            start = lba * src.sector
+            fs = detect_fs(src, start) if start < src.size else ""
+            add("part", start, count * src.sector, f"MBR 파티션 {i + 1}: {MBR_TYPES.get(ptype, f'0x{ptype:02X}')}",
+                f"파일시스템 {fs}" if fs else ("디스크 범위 밖!" if start >= src.size else ""))
+    elif not gpt_found:
+        add("warn", 0, 512, "파티션 테이블 없음",
+            "LBA0 이 비었거나 손상됨 — 시그니처 스캔으로 파티션 시작 위치를 찾아보세요")
+    for s, e in src.bad.ranges()[:200]:
+        add("bad", s, e - s, "읽기 실패 구간")
+    return items
+
+
+def format_layout(items: list[dict]) -> str:
+    if not items:
+        return "구조 정보 없음"
+    return "\n".join(f"0x{it['offset']:012X}  {human_size(it['length']):>12}  {it['label']}"
+                     + (f"  — {it['detail']}" if it["detail"] else "") for it in items)
+
+
+def _bootsig(d: bytes, i: int) -> bool:
+    return d[i + 510:i + 512] == b"\x55\xaa"
+
+
+def _ext_superblock(d: bytes, i: int) -> bool:
+    log_bs, = struct.unpack_from("<I", d, i + 24)
+    state, = struct.unpack_from("<H", d, i + 58)
+    rev, = struct.unpack_from("<I", d, i + 76)
+    return log_bs <= 6 and rev <= 1 and 1 <= state <= 7
+
+
+# (이름, 섹터 시작 기준 위치, 매직 바이트, 추가 검사)
+SIGNATURES = [
+    ("GPT 헤더", 0, b"EFI PART", None),
+    ("NTFS 부트 섹터 (파티션 시작)", 3, b"NTFS    ", _bootsig),
+    ("exFAT 부트 섹터 (파티션 시작)", 3, b"EXFAT   ", _bootsig),
+    ("FAT32 부트 섹터 (파티션 시작)", 82, b"FAT32   ", _bootsig),
+    ("BitLocker 볼륨 (파티션 시작)", 3, b"-FVE-FS-", None),
+    ("ext 슈퍼블록 (파티션 시작 = 여기 - 0x400)", 56, b"\x53\xef", _ext_superblock),
+    ("LUKS 암호화 헤더", 0, b"LUKS\xba\xbe", None),
+    ("APFS 컨테이너", 32, b"NXSB", None),
+    ("JPEG 사진", 0, b"\xff\xd8\xff", lambda d, i: d[i + 3] in (0xE0, 0xE1, 0xDB, 0xEE)),
+    ("PNG 이미지", 0, b"\x89PNG\r\n\x1a\n", None),
+    ("PDF 문서", 0, b"%PDF-", None),
+    ("ZIP / Office 문서", 0, b"PK\x03\x04", None),
+    ("MP4 / MOV 동영상", 4, b"ftyp", None),
+    ("SQLite DB", 0, b"SQLite format 3\x00", None),
+    ("7z 압축", 0, b"7z\xbc\xaf\x27\x1c", None),
+    ("RAR 압축", 0, b"Rar!\x1a\x07", None),
+]
+_SIG_BY_MAGIC: dict[bytes, list] = {}
+for _sig in SIGNATURES:
+    _SIG_BY_MAGIC.setdefault(_sig[2], []).append(_sig)
+_SIG_RE = re.compile(b"|".join(re.escape(m) for m in sorted(_SIG_BY_MAGIC, key=len, reverse=True)))
+
+
+def scan_signatures(src: ByteSource, start: int = 0, length: int | None = None, step: int = 512,
+                    progress=None, should_stop=None, limit: int = 2000) -> list[tuple[int, str]]:
+    """섹터 경계에서 시작하는 파티션 부트 섹터·파일 시그니처를 찾는다 (파일 시작은 대부분 섹터 경계)."""
+    end = src.size if length is None else min(src.size, start + length)
+    start -= start % step
+    hits: list[tuple[int, str]] = []
+    pos = start
+    while pos < end:
+        n = min(CHUNK, end - pos)
+        data = bytes(src.read(pos, n + 512))
+        for m in _SIG_RE.finditer(data):
+            for name, rel, _magic, check in _SIG_BY_MAGIC[m.group()]:
+                s = m.start() - rel
+                if s < 0 or s >= n or (pos + s) % step:
+                    continue
+                try:
+                    if check and not check(data, s):
+                        continue
+                except (IndexError, struct.error):
+                    continue
+                hits.append((pos + s, name))
+                if len(hits) >= limit:
+                    return hits
+        pos += n
+        if progress:
+            progress(pos - start, end - start)
+        if should_stop and should_stop():
+            break
+    return hits
+
+
+def rescue_image(src: ByteSource, out_path: str, offset: int = 0, length: int | None = None,
+                 block: int = 1 << 16, retries: int = 2, progress=None, should_stop=None) -> dict:
+    """ddrescue 처럼 읽을 수 있는 곳부터 이미지로 복사한다.
+
+    1단계: block 단위로 빠르게 복사, 오류 난 블록은 건너뛰고 '보류'에 기록
+    2단계: 보류 구간을 섹터 단위로 재시도, 끝내 실패한 섹터는 0으로 두고 '불량'에 기록
+    진행 상황은 <출력>.rescue.json 에 저장되어, 같은 명령을 다시 실행하면 이어서 한다."""
+    sec = src.sector
+    offset -= offset % sec
+    end = src.size if length is None else min(src.size, offset + length)
+    block = max(sec, block - block % sec)
+    map_path = rescue_map_path(out_path)
+    state = None
+    if os.path.exists(map_path) and os.path.exists(out_path):
+        try:
+            with open(map_path, encoding="utf-8") as f:
+                old = json.load(f)
+            if (old.get("source"), old.get("offset"), old.get("length")) == (src.path, offset, end - offset):
+                state = old
+        except (OSError, ValueError):
+            pass
+    if state is None:
+        state = {"version": 1, "source": src.path, "offset": offset, "length": end - offset, "sector": sec,
+                 "pos": offset, "pending": [], "bad": [], "finished": False}
+        with open(out_path, "wb") as f:
+            f.truncate(end - offset)
+    pending, bad = RangeSet(state["pending"]), RangeSet(state["bad"])
+    last_save = [0.0]
+
+    def save(force=False):
+        if force or time.time() - last_save[0] > 2:
+            state["pending"], state["bad"] = pending.ranges(), bad.ranges()
+            with open(map_path + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(state, f)
+            os.replace(map_path + ".tmp", map_path)
+            last_save[0] = time.time()
+
+    def report(phase):
+        if progress:
+            progress({"phase": phase, "done": state["pos"] - offset, "total": end - offset,
+                      "pending": pending.total(), "bad": bad.total()})
+
+    stopped = False
+    with open(out_path, "r+b") as out:
+        pos = state["pos"]
+        while pos < end and not stopped:
+            n = min(block, end - pos)
+            try:
+                data = src.read_strict(pos, n)
+                out.seek(pos - offset)
+                out.write(data)
+            except OSError:
+                pending.add(pos, pos + n)
+            pos += n
+            state["pos"] = pos
+            report(1)
+            save()
+            stopped = bool(should_stop and should_stop())
+        for s, e in ([] if stopped else pending.ranges()):
+            p = s
+            while p < e and not stopped:
+                n = min(sec, e - p)
+                data = None
+                for _ in range(retries + 1):
+                    try:
+                        data = src.read_strict(p, n)
+                        break
+                    except OSError:
+                        data = None
+                if data is None:
+                    bad.add(p, p + n)
+                else:
+                    out.seek(p - offset)
+                    out.write(data)
+                pending.remove(p, p + n)
+                p += n
+                report(2)
+                save()
+                stopped = bool(should_stop and should_stop())
+    state["finished"] = not stopped and state["pos"] >= end and not len(pending)
+    save(force=True)
+    for s, e in bad.ranges():
+        src.bad.add(s, e)
+    return {"map": map_path, "finished": state["finished"], "copied": state["pos"] - offset,
+            "total": end - offset, "pending": pending.ranges(), "bad": bad.ranges(),
+            "bad_bytes": bad.total() + pending.total()}
+
+
+def format_rescue(res: dict) -> str:
+    L = [("완료" if res["finished"] else "중단됨 — 같은 명령을 다시 실행하면 이어서 진행합니다"),
+         f"처리: {human_size(res['copied'])} / {human_size(res['total'])}",
+         f"읽지 못한 양: {human_size(res['bad_bytes'])} (불량 {len(res['bad'])}구간, 보류 {len(res['pending'])}구간)",
+         f"진행 기록: {res['map']}"]
+    for s, e in res["bad"][:30]:
+        L.append(f"  불량 0x{s:X} ~ 0x{e - 1:X} ({human_size(e - s)})")
+    if len(res["bad"]) > 30:
+        L.append(f"  … 외 {len(res['bad']) - 30}구간")
+    return "\n".join(L)
 
 
 # ---------------------------------------------------------------------------
@@ -834,6 +1326,160 @@ def format_scan(items: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 드라이브 상태 (SMART / NVMe health log)
+# ---------------------------------------------------------------------------
+
+NVME_CRITICAL_BITS = ["예비 블록이 임계값 아래로 떨어짐", "온도 임계값 초과", "NVM 신뢰성 저하 (미디어/내부 오류)",
+                      "읽기 전용 모드로 전환됨", "휘발성 메모리 백업 장치 고장"]
+
+
+def _run_tool(cmd: list[str], timeout: int = 60) -> str:
+    flags = 0x08000000 if IS_WINDOWS else 0
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, creationflags=flags,
+                             encoding="utf-8", errors="replace")
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return res.stdout
+
+
+def _as_int(v):
+    if isinstance(v, dict):  # 일부 nvme-cli 버전은 {"value": n} 형태
+        v = v.get("value")
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_smart(log: dict) -> dict:
+    """smartctl / nvme-cli 의 서로 다른 키 이름을 하나로 맞춘다."""
+    def g(*keys):
+        for k in keys:
+            if k in log:
+                return _as_int(log[k])
+        return None
+    temp = g("temperature")
+    if temp is not None and temp > 200:  # nvme-cli 는 켈빈
+        temp -= 273
+    return {"critical_warning": g("critical_warning"), "temperature_c": temp,
+            "available_spare": g("available_spare", "avail_spare"),
+            "spare_threshold": g("available_spare_threshold", "spare_thresh"),
+            "percentage_used": g("percentage_used", "percent_used"),
+            "data_units_read": g("data_units_read"), "data_units_written": g("data_units_written"),
+            "power_on_hours": g("power_on_hours"), "unsafe_shutdowns": g("unsafe_shutdowns"),
+            "media_errors": g("media_errors"), "error_log_entries": g("num_err_log_entries")}
+
+
+def read_health(path: str) -> dict:
+    """smartctl → nvme-cli → (Windows) 저장소 신뢰성 카운터 순서로 상태를 읽는다.
+
+    USB 케이스 안의 NVMe 는 smartctl 의 sntrealtek / sntjmicron / sntasmedia 방식으로
+    브릿지를 통과해서 읽는다 (smartmontools 7.2 이상 권장)."""
+    path = normalize_device_path(path)
+    tried = []
+    smartctl = shutil.which("smartctl")
+    if smartctl:
+        m = re.search(r"PhysicalDrive(\d+)", path, re.IGNORECASE)
+        target = f"/dev/pd{m.group(1)}" if IS_WINDOWS and m else path
+        for dtype in (None, "sntrealtek", "sntjmicron", "sntasmedia"):
+            out = _run_tool([smartctl, "-a", "-j", target] + (["-d", dtype] if dtype else []))
+            try:
+                j = json.loads(out)
+            except ValueError:
+                j = {}
+            log = j.get("nvme_smart_health_information_log")
+            label = "smartctl" + (f" -d {dtype}" if dtype else "")
+            if log:
+                return {"source": label, "model": j.get("model_name", ""),
+                        "firmware": j.get("firmware_version", ""),
+                        "passed": (j.get("smart_status") or {}).get("passed"), **normalize_smart(log)}
+            tried.append(label)
+    else:
+        tried.append("smartctl 미설치")
+    if not IS_WINDOWS and shutil.which("nvme"):
+        out = _run_tool(["nvme", "smart-log", path, "-o", "json"])
+        try:
+            return {"source": "nvme-cli", "model": "", "firmware": "", "passed": None,
+                    **normalize_smart(json.loads(out))}
+        except ValueError:
+            tried.append("nvme-cli")
+    if IS_WINDOWS:
+        m = re.search(r"PhysicalDrive(\d+)", path, re.IGNORECASE)
+        if m:
+            try:
+                rows = _powershell_json(
+                    f"Get-PhysicalDisk | Where-Object DeviceId -eq '{m.group(1)}' | Get-StorageReliabilityCounter | "
+                    "Select-Object Temperature,Wear,ReadErrorsUncorrected,PowerOnHours | ConvertTo-Json -Compress")
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                rows = []
+            if rows and any(v is not None for v in rows[0].values()):
+                r = rows[0]
+                return {"source": "Windows 저장소 신뢰성 카운터", "model": "", "firmware": "", "passed": None,
+                        "critical_warning": None, "temperature_c": _as_int(r.get("Temperature")),
+                        "available_spare": None, "spare_threshold": None,
+                        "percentage_used": _as_int(r.get("Wear")), "data_units_read": None,
+                        "data_units_written": None, "power_on_hours": _as_int(r.get("PowerOnHours")),
+                        "unsafe_shutdowns": None, "media_errors": _as_int(r.get("ReadErrorsUncorrected")),
+                        "error_log_entries": None}
+            tried.append("Windows 신뢰성 카운터")
+    raise OSError("드라이브 상태를 읽지 못했습니다 (시도: " + ", ".join(tried) + ").\n"
+                  "smartmontools 를 설치하면 USB 케이스 안의 NVMe 도 읽을 수 있습니다:\n"
+                  "  Windows: https://www.smartmontools.org 설치 후 관리자 권한으로 실행\n"
+                  "  Linux  : sudo apt install smartmontools")
+
+
+def health_verdicts(h: dict) -> list[str]:
+    out = []
+    cw = h.get("critical_warning") or 0
+    for bit, text in enumerate(NVME_CRITICAL_BITS):
+        if cw & (1 << bit):
+            out.append(f"⚠ 치명 경고: {text}")
+    if cw & 0x08:
+        out.append("⚠ 드라이브가 스스로 읽기 전용이 됨 — 수명 종료 상태. 지금 바로 데이터를 복사하세요.")
+    if (h.get("media_errors") or 0) > 0:
+        out.append(f"⚠ 미디어 오류 {h['media_errors']}건 — 읽을 수 없는 블록이 있습니다. "
+                   "탐색보다 '복구 이미지'를 먼저 만드세요.")
+    if (h.get("percentage_used") or 0) >= 100:
+        out.append(f"⚠ 수명 사용률 {h['percentage_used']}% — 보증 수명을 넘었습니다.")
+    spare, thresh = h.get("available_spare"), h.get("spare_threshold")
+    if spare is not None and thresh is not None and spare <= thresh:
+        out.append(f"⚠ 예비 블록 {spare}% (임계 {thresh}%) — 곧 쓰기가 막힐 수 있습니다.")
+    if (h.get("temperature_c") or 0) >= 70:
+        out.append(f"⚠ 온도 {h['temperature_c']}°C — 과열. 케이스 방열(써멀패드) 확인.")
+    if h.get("passed") is False:
+        out.append("⚠ SMART 종합 판정: 실패")
+    if not out:
+        out.append("SMART 상으로는 큰 이상 없음. 인식이 끊기거나 느리면 SSD 보다는 케이스(브릿지 펌웨어)·"
+                   "케이블·USB 포트 전원 문제일 가능성이 큽니다. 다른 케이블/포트, 브릿지 펌웨어 업데이트를 먼저 시도하세요.")
+    return out
+
+
+def format_health(h: dict, path: str = "") -> str:
+    def tb(units):
+        return human_size(units * 512000) if units is not None else "-"
+
+    def v(key, unit=""):
+        val = h.get(key)
+        return "-" if val is None else f"{val}{unit}"
+    L = [f"=== 드라이브 상태 {path} ({h.get('source', '')}) ==="]
+    if h.get("model") or h.get("firmware"):
+        L.append(f"모델: {h.get('model', '')}   펌웨어: {h.get('firmware', '')}")
+    L += [f"치명 경고 비트 : {v('critical_warning')}",
+          f"온도           : {v('temperature_c', '°C')}",
+          f"예비 블록      : {v('available_spare', '%')} (임계 {v('spare_threshold', '%')})",
+          f"수명 사용률    : {v('percentage_used', '%')}",
+          f"읽은 양 / 쓴 양: {tb(h.get('data_units_read'))} / {tb(h.get('data_units_written'))}",
+          f"사용 시간      : {v('power_on_hours', '시간')}",
+          f"비정상 종료    : {v('unsafe_shutdowns', '회')}",
+          f"미디어 오류    : {v('media_errors', '건')}",
+          f"오류 로그      : {v('error_log_entries', '건')}",
+          "", "[판정]"]
+    L += [f"  {x}" for x in health_verdicts(h)]
+    return "\n".join(L)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -865,15 +1511,80 @@ def cmd_info(args) -> int:
     return 0
 
 
+def _open_for_reading(args) -> ByteSource:
+    src = ByteSource(args.path, size=parse_size(args.size) if getattr(args, "size", None) else None)
+    if src.size == 0:
+        src.close()
+        raise OSError(errno.EIO, "용량이 0 으로 보입니다 (고장 디스크일 수 있음). --size 512G 처럼 크기를 직접 지정하세요")
+    src.retries = getattr(args, "retries", 0) or 0
+    return src
+
+
 def cmd_dump(args) -> int:
-    src = ByteSource(args.path)
+    src = _open_for_reading(args)
     try:
         offset = parse_int(args.offset)
         data = src.read(offset, parse_int(args.length))
+        bad = src.bad_offsets(offset, offset + len(data))
     finally:
         src.close()
-    for line in hexdump_lines(bytes(data), offset):
+    for line in hexdump_lines(bytes(data), offset, bad):
         print(line)
+    if bad:
+        print(f"※ ?? = 읽기 실패 ({len(bad)} 바이트)", file=sys.stderr)
+    return 0
+
+
+def cmd_layout(args) -> int:
+    src = _open_for_reading(args)
+    try:
+        print(f"{src.path}  크기 {human_size(src.size)}  논리 섹터 {src.sector}B")
+        print(format_layout(parse_layout(src)))
+    finally:
+        src.close()
+    return 0
+
+
+def cmd_sigscan(args) -> int:
+    src = _open_for_reading(args)
+    stop = threading.Event()
+    old = signal.signal(signal.SIGINT, lambda *a: stop.set())
+    try:
+        def progress(done, total):
+            print(f"\r스캔 {human_size(done)} / {human_size(total)}", end="", file=sys.stderr)
+        hits = scan_signatures(src, parse_int(args.offset), parse_size(args.length) if args.length else None,
+                               parse_int(args.step), progress, stop.is_set, args.max)
+    finally:
+        signal.signal(signal.SIGINT, old)
+        src.close()
+    print(file=sys.stderr)
+    for off, name in hits:
+        print(f"0x{off:012X}  {name}")
+    print(f"{len(hits)}개 발견" + (" (Ctrl+C 로 중단됨)" if stop.is_set() else ""), file=sys.stderr)
+    return 0
+
+
+def cmd_rescue(args) -> int:
+    src = _open_for_reading(args)
+    stop = threading.Event()
+    old = signal.signal(signal.SIGINT, lambda *a: stop.set())
+    try:
+        def progress(p):
+            print(f"\r[{p['phase']}단계] {human_size(p['done'])} / {human_size(p['total'])}  "
+                  f"보류 {human_size(p['pending'])}  불량 {human_size(p['bad'])}   ", end="", file=sys.stderr)
+        res = rescue_image(src, args.out, parse_int(args.offset), parse_size(args.length) if args.length else None,
+                           parse_size(args.block), args.retries, progress, stop.is_set)
+    finally:
+        signal.signal(signal.SIGINT, old)
+        src.close()
+    print(file=sys.stderr)
+    print(format_rescue(res))
+    return 0 if res["finished"] else 3
+
+
+def cmd_health(args) -> int:
+    h = read_health(args.path)
+    print(json.dumps(h, ensure_ascii=False, indent=2) if args.json else format_health(h, args.path))
     return 0
 
 
@@ -1012,23 +1723,62 @@ def build_parser() -> argparse.ArgumentParser:
                "  nvme_hexedit diff orico_stock.bin generic.bin\n"
                "  nvme_hexedit patch fw.bin --usb-id 0BDA:9210 --fix-checksum auto -o fw_new.bin\n"
                "  nvme_hexedit dump /dev/nvme0n1 --length 0x200          (Linux, sudo)\n"
-               "  nvme_hexedit image PhysicalDrive2 head.bin --length 0x100000   (Windows, 관리자)")
+               "  nvme_hexedit image PhysicalDrive2 head.bin --length 0x100000   (Windows, 관리자)\n"
+               "\n고장 디스크:\n"
+               "  nvme_hexedit health /dev/sda                    SMART 상태와 판정\n"
+               "  nvme_hexedit rescue /dev/sda disk.img           불량 섹터 건너뛰며 이미지 (먼저 할 것!)\n"
+               "  nvme_hexedit layout disk.img                    파티션/파일시스템 구조, 손상 여부\n"
+               "  nvme_hexedit sigscan disk.img --length 10G      파티션 시작·사진·문서 위치 찾기\n"
+               "  nvme_hexedit gui disk.img                       이미지 탐색 (못 읽은 곳은 ??)")
     p.add_argument("--version", action="version", version=__version__)
     sub = p.add_subparsers(dest="cmd")
 
     g = sub.add_parser("gui", help="GUI 실행")
     g.add_argument("path", nargs="?")
+    g.add_argument("--size", help="용량 인식이 안 되는 고장 디스크를 이 크기로 열기 (예: 512G)")
 
     s = sub.add_parser("info", help="펌웨어 분석 (칩·VID/PID·문자열·체크섬)")
     s.add_argument("path")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_info)
 
-    s = sub.add_parser("dump", help="헥스 덤프 출력 (파일/디스크)")
+    size_help = "용량 인식이 안 되는 고장 디스크를 이 크기로 열기 (예: 512G)"
+    s = sub.add_parser("dump", help="헥스 덤프 출력 (파일/디스크, 읽기 실패는 ??)")
     s.add_argument("path")
     s.add_argument("--offset", default="0")
     s.add_argument("--length", default="0x100")
+    s.add_argument("--size", help=size_help)
+    s.add_argument("--retries", type=int, default=0, help="실패한 섹터 재시도 횟수")
     s.set_defaults(func=cmd_dump)
+
+    s = sub.add_parser("layout", help="[고장 디스크] 파티션 테이블(MBR/GPT)·파일시스템·손상 여부 표시")
+    s.add_argument("path")
+    s.add_argument("--size", help=size_help)
+    s.set_defaults(func=cmd_layout)
+
+    s = sub.add_parser("sigscan", help="[고장 디스크] 파티션 부트 섹터·사진·문서 시그니처 찾기")
+    s.add_argument("path")
+    s.add_argument("--offset", default="0")
+    s.add_argument("--length", help="생략하면 끝까지 (예: 10G)")
+    s.add_argument("--step", default="512", help="검사 간격 (기본 512)")
+    s.add_argument("--max", type=int, default=2000, help="최대 결과 수")
+    s.add_argument("--size", help=size_help)
+    s.set_defaults(func=cmd_sigscan)
+
+    s = sub.add_parser("rescue", help="[고장 디스크] 불량 섹터를 건너뛰며 복구 이미지 만들기 (이어하기 지원)")
+    s.add_argument("path", help="원본 디스크 (예: /dev/sda, PhysicalDrive2)")
+    s.add_argument("out", help="저장할 이미지 파일 (진행 기록은 <파일>.rescue.json)")
+    s.add_argument("--offset", default="0")
+    s.add_argument("--length", help="생략하면 끝까지")
+    s.add_argument("--block", default="64K", help="1단계 읽기 단위 (기본 64K)")
+    s.add_argument("--retries", type=int, default=2, help="2단계 섹터 재시도 횟수 (기본 2)")
+    s.add_argument("--size", help=size_help)
+    s.set_defaults(func=cmd_rescue)
+
+    s = sub.add_parser("health", help="[고장 디스크] SMART/NVMe 상태와 판정 (smartctl 권장)")
+    s.add_argument("path", help="예: /dev/nvme0n1, /dev/sda, PhysicalDrive2")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_health)
 
     s = sub.add_parser("scan", help="연결된 USB 브릿지 / NVMe 장치와 펌웨어 버전 표시")
     s.add_argument("--json", action="store_true")
@@ -1089,7 +1839,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.cmd in (None, "gui"):
-        return run_gui(getattr(args, "path", None))
+        size = getattr(args, "size", None)
+        return run_gui(getattr(args, "path", None), parse_size(size) if size else None)
     try:
         return args.func(args)
     except (OSError, ValueError) as e:
@@ -1149,6 +1900,36 @@ HELP_TEXT = f"""{APP_NAME} {__version__}
   Windows: \\\\.\\PhysicalDrive1 (관리자 권한 필요)
   Linux  : /dev/nvme0n1, /dev/sda (sudo 필요)
   기본은 읽기 전용입니다. 쓰기는 경고를 확인한 경우에만 허용됩니다.
+
+■ 고장 난 SSD 는 '고장 디스크' 메뉴 → '고장 디스크 대처 순서' 참고
+  읽기 실패한 곳은 ?? (분홍색) 로 표시되고, Ctrl+B 로 다음 실패 위치로 이동합니다.
+"""
+
+BROKEN_HELP = """고장 난 NVMe(SSD) 탐색 · 복구 순서
+
+1. 먼저 케이스/케이블을 의심하세요
+   • 다른 USB 포트(뒷면 포트), 다른 케이블, 가능하면 다른 케이스나 메인보드 M.2 슬롯에 꽂아 보세요.
+   • ORICO 케이스의 인식 끊김·용량 0·속도 저하는 SSD 가 아니라 브릿지 칩(펌웨어)·전원 문제인 경우가 많습니다.
+
+2. 드라이브 상태 (SMART) 확인
+   • 미디어 오류 > 0, 치명 경고, '읽기 전용 모드' 가 보이면 SSD 자체 고장입니다.
+   • USB 케이스 안의 NVMe 는 smartmontools(smartctl) 가 있어야 읽을 수 있습니다.
+
+3. 복구 이미지부터 만드세요 (가장 중요!)
+   • 고장 디스크는 읽을 때마다 상태가 나빠질 수 있습니다. 한 번에 이미지로 떠 두고, 탐색은 이미지로 하세요.
+   • 1단계에서 읽히는 곳을 빠르게 복사하고, 2단계에서 실패한 곳만 섹터 단위로 재시도합니다.
+   • 중간에 멈춰도 같은 출력 파일로 다시 시작하면 이어서 합니다. 이미지 저장 공간은 SSD 용량만큼 필요합니다.
+
+4. 이미지(또는 디스크)를 열고 구조 탐색
+   • 파티션 테이블(MBR/GPT)·백업 GPT·파일시스템 종류와 손상 여부를 보여줍니다.
+   • 파티션 테이블이 깨졌으면 '시그니처 스캔' 으로 NTFS/exFAT/FAT32 부트 섹터, ext 슈퍼블록,
+     사진(JPEG/PNG)·문서(PDF/Office)·동영상 시작 위치를 찾을 수 있습니다.
+   • 읽기 실패 구간은 ?? 로 표시됩니다 (이미지라면 .rescue.json 기록을 자동으로 읽습니다).
+
+5. 실제 파일 복구는 이미지 파일에 전용 도구(TestDisk/PhotoRec, DMDE 등)를 쓰는 것이 안전합니다.
+   이 프로그램은 '어디가 살아 있고 무엇이 남아 있는지' 를 직접 확인하는 용도입니다.
+
+※ 고장 디스크에는 절대 쓰지 마세요 (기본이 읽기 전용입니다).
 """
 
 
@@ -1195,9 +1976,14 @@ class FindDialog:
 
 
 class HexEditorApp:
-    def __init__(self, root, initial_path: str | None = None):
+    def __init__(self, root, initial_path: str | None = None, initial_size: int | None = None):
         self.root = root
         self.src: ByteSource | None = None
+        # 디스크는 백그라운드 스레드에서 읽는다 (불량 섹터에서 수십 초 걸려도 화면이 멈추지 않게)
+        self._page_key: tuple[int, int] | None = None
+        self._page_raw = b""
+        self._loading = False
+        self._load_result = None
         self.top_row = 0
         self.rows = 32
         self.cursor = 0
@@ -1222,7 +2008,7 @@ class HexEditorApp:
         root.protocol("WM_DELETE_WINDOW", self.quit)
         self.render()
         if initial_path:
-            root.after(50, lambda: self.open_path(initial_path))
+            root.after(50, lambda: self.open_path(initial_path, size=initial_size))
 
     # --- UI 구성 ---
     def _build_menu(self):
@@ -1255,6 +2041,15 @@ class HexEditorApp:
         t.add_command(label="장치 검색 (브릿지 칩·펌웨어 버전)", command=lambda: DeviceScanWindow(self))
         t.add_command(label="두 파일 비교…", command=self.cmd_diff)
         m.add_cascade(label="도구", menu=t)
+        b = tk.Menu(m, tearoff=False)
+        b.add_command(label="드라이브 상태 (SMART) 확인", command=self.cmd_health)
+        b.add_command(label="복구 이미지 만들기 (불량 섹터 건너뛰기)…", command=lambda: RescueWindow(self))
+        b.add_separator()
+        b.add_command(label="구조 탐색 (파티션·파일시스템·시그니처)", command=self.cmd_layout)
+        b.add_command(label="다음 읽기 실패 위치로", accelerator="Ctrl+B", command=self.goto_next_bad)
+        b.add_separator()
+        b.add_command(label="고장 디스크 대처 순서", command=lambda: self.show_text("고장 디스크", BROKEN_HELP))
+        m.add_cascade(label="고장 디스크", menu=b)
         h = tk.Menu(m, tearoff=False)
         h.add_command(label="사용법", command=lambda: self.show_text("사용법", HELP_TEXT))
         h.add_command(label="정보", command=lambda: messagebox.showinfo(
@@ -1297,6 +2092,7 @@ class HexEditorApp:
         self.text.tag_configure("offs", foreground="#7a7a7a")
         self.text.tag_configure("mod", foreground="#d32f2f", font=tkfont.Font(font=self.font, weight="bold"))
         self.text.tag_configure("found", background="#ffe082")
+        self.text.tag_configure("bad", background="#ffcdd2", foreground="#b71c1c")
         self.text.tag_configure("cur", background="#1e88e5", foreground="white")
         self.text.tag_configure("cur2", background="#bbdefb")
         self.text.configure(state="disabled")
@@ -1312,6 +2108,7 @@ class HexEditorApp:
         r.bind("<Control-g>", lambda e: self.cmd_goto())
         r.bind("<Control-f>", lambda e: FindDialog(self))
         r.bind("<F3>", lambda e: self.find_next(False))
+        r.bind("<Control-b>", lambda e: self.goto_next_bad())
         t.bind("<Button-1>", self._on_click)
         t.bind("<B1-Motion>", lambda e: "break")
         t.bind("<Double-Button-1>", lambda e: "break")
@@ -1326,16 +2123,43 @@ class HexEditorApp:
             return messagebox.askyesno("저장하지 않은 변경", "저장하지 않은 변경이 있습니다. 버리시겠습니까?")
         return True
 
-    def open_path(self, path: str, allow_device_write: bool = False):
+    def _ask_size(self, path: str, reason: str) -> int | None:
+        t = simpledialog.askstring(
+            "용량 직접 지정", f"{path}\n{reason}\n\n고장 난 디스크는 용량을 0 이나 엉뚱한 값으로 알려주기도 합니다.\n"
+                         "SSD 실제 용량을 입력하면 그 크기로 엽니다 (예: 512G, 1T, 0x7470C06000)", parent=self.root)
+        if not t:
+            return None
+        try:
+            return parse_size(t)
+        except ValueError:
+            messagebox.showerror("용량", f"알 수 없는 크기: {t}")
+            return None
+
+    def open_path(self, path: str, allow_device_write: bool = False, size: int | None = None):
         if not self.confirm_discard():
             return
         try:
-            src = ByteSource(path, allow_device_write)
-        except OSError as e:
+            src = ByteSource(path, allow_device_write, size)
+        except PermissionError as e:
             messagebox.showerror("열기 실패", f"{path}\n{e}{access_hint(e)}")
+            return
+        except OSError as e:
+            if size is None and is_device_path(normalize_device_path(path)):
+                size = self._ask_size(path, f"용량을 읽지 못했습니다: {e}")
+                if size:
+                    self.open_path(path, allow_device_write, size)
+                return
+            messagebox.showerror("열기 실패", f"{path}\n{e}{access_hint(e)}")
+            return
+        if src.size == 0 and src.is_device:
+            src.close()
+            size = self._ask_size(path, "용량이 0 으로 보고됩니다.")
+            if size:
+                self.open_path(path, allow_device_write, size)
             return
         self.close_source(force=True)
         self.src = src
+        self._page_key, self._page_raw = None, b""
         self.top_row = self.cursor = 0
         self.undo_stack.clear()
         self.redo_stack.clear()
@@ -1402,6 +2226,7 @@ class HexEditorApp:
         except OSError as e:
             messagebox.showerror("저장 실패", f"{e}{access_hint(e)}")
             return
+        self._page_key = None  # 디스크 내용이 바뀌었으니 화면 캐시 무효화
         self.undo_stack.clear()
         self.redo_stack.clear()
         self.render()
@@ -1741,13 +2566,50 @@ class HexEditorApp:
             self.move_to(self.cursor + 1)
         return "break"
 
+    def _page_data(self, start: int, n: int):
+        """현재 화면 데이터. 디스크는 백그라운드에서 읽고, 아직이면 None."""
+        src = self.src
+        if not src.is_device:
+            return src.read(start, n)
+        if self._page_key == (start, n):
+            buf = bytearray(self._page_raw)
+            for k in src.patched_in_range(start, start + len(buf)):
+                buf[k - start] = src.patches[k]
+            return buf
+        if not self._loading:
+            self._loading = True
+            self._load_result = None
+            key = (start, n)
+
+            def work():
+                try:
+                    raw = src.read_raw(*key)
+                except Exception:  # 읽는 중에 장치를 닫은 경우 등
+                    raw = b""
+                self._load_result = (src, key, raw)
+            threading.Thread(target=work, daemon=True).start()
+            self.root.after(20, self._poll_page_load)
+        return None
+
+    def _poll_page_load(self):
+        if self._load_result is None:
+            self.root.after(30, self._poll_page_load)
+            return
+        src, key, raw = self._load_result
+        self._loading = False
+        if src is self.src:
+            self._page_key, self._page_raw = key, raw
+            self.render()
+
     def render(self):
         t = self.text
         t.configure(state="normal")
         t.delete("1.0", "end")
+        self._view = (0, b"")
         if not self.src:
             t.insert("1.0", "\n  파일 → 파일 열기 (Ctrl+O) 로 펌웨어 .bin 을 열거나\n"
-                            "  도구 → 장치 검색 으로 케이스의 브릿지 칩과 펌웨어 버전을 확인하세요.\n\n"
+                            "  도구 → 장치 검색 으로 케이스의 브릿지 칩과 펌웨어 버전을 확인하세요.\n"
+                            "  고장 난 SSD 라면 고장 디스크 → 고장 디스크 대처 순서 를 먼저 보세요.\n\n"
                             "  도움말 → 사용법 에 작업 순서가 있습니다.")
             t.configure(state="disabled")
             self.vsb.set(0, 1)
@@ -1758,12 +2620,27 @@ class HexEditorApp:
         w = self.off_width
         hx, ax = self._cols()
         start = self.top_row * 16
-        data = self.src.read(start, self.rows * 16)
+        want = max(0, min(self.rows * 16, self.src.size - start))
+        data = self._page_data(start, want)
+        total = max(self.total_rows(), 1)
+        self.vsb.set(self.top_row / total, min(1.0, (self.top_row + self.rows) / total))
+        if data is None:
+            lines = [f"{start + r:0{w}X}  " + " ".join(["··"] * 16) + "   " + "·" * 16
+                     for r in range(0, want, 16)]
+            t.insert("1.0", "\n".join(lines))
+            t.configure(state="disabled")
+            self.status.set(f"{self.src.path}  |  0x{start:X} 읽는 중… (불량 섹터면 수십 초 걸릴 수 있음)")
+            return
+        self._view = (start, bytes(data))
+        bad = self.src.bad_offsets(start, start + len(data))
         lines = []
         for r in range(0, len(data), 16):
             chunk = data[r:r + 16]
-            lines.append(f"{start + r:0{w}X}  " + " ".join(f"{b:02X}" for b in chunk).ljust(47) + "  "
-                         + "".join(chr(b) if 32 <= b < 127 else "." for b in chunk))
+            offs = range(start + r, start + r + len(chunk))
+            lines.append(f"{start + r:0{w}X}  "
+                         + " ".join("??" if o in bad else f"{b:02X}" for o, b in zip(offs, chunk)).ljust(47)
+                         + "  " + "".join("?" if o in bad else (chr(b) if 32 <= b < 127 else ".")
+                                          for o, b in zip(offs, chunk)))
         t.insert("1.0", "\n".join(lines))
         for r in range(len(lines)):
             t.tag_add("offs", f"{r + 1}.0", f"{r + 1}.{w}")
@@ -1775,6 +2652,8 @@ class HexEditorApp:
                 t.tag_add(hex_tag or tag, f"{line}.{hx + 3 * i}", f"{line}.{hx + 3 * i + 2}")
                 t.tag_add(tag, f"{line}.{ax + i}", f"{line}.{ax + i + 1}")
 
+        for off in bad:
+            mark(off, "bad")
         for off in self.src.patched_in_range(start, start + len(data)):
             mark(off, "mod")
         if self.found:
@@ -1790,31 +2669,92 @@ class HexEditorApp:
         t.tag_raise("cur2")
         t.configure(state="disabled")
 
-        total = max(self.total_rows(), 1)
-        self.vsb.set(self.top_row / total, min(1.0, (self.top_row + self.rows) / total))
-        self._update_inspector()
+        self._update_inspector(bad)
         mode = "편집 가능" if self.src.writable else "읽기 전용"
         kind = "디스크" if self.src.is_device else "파일"
+        bad_info = (f"  |  읽기 실패 {len(self.src.bad)}구간 {human_size(self.src.bad.total())} (Ctrl+B)"
+                    if len(self.src.bad) else "")
         self.status.set(f"{self.src.path}  |  {kind} {human_size(self.src.size)}  |  {mode}  |  "
                         f"커서 0x{self.cursor:X} ({self.cursor})  |  영역 {self.area.upper()}  |  "
-                        f"변경 {len(self.src.patches)} 바이트")
+                        f"변경 {len(self.src.patches)} 바이트{bad_info}")
 
-    def _update_inspector(self):
-        b = bytes(self.src.read(self.cursor, 4))
+    def _update_inspector(self, bad: set[int]):
+        start, data = self._view
+        rel = self.cursor - start
+        b = data[rel:rel + 4] if 0 <= rel < len(data) else b""
         v = self.inspect_vars
+        for var in v.values():
+            var.set("-")
         v["오프셋"].set(f"0x{self.cursor:X} / {self.cursor}")
         if not b:
             return
+        if self.cursor in bad:
+            v["u8"].set("읽기 실패 섹터")
+            return
         v["u8"].set(f"{b[0]} (0x{b[0]:02X})")
         v["s8"].set(str(struct.unpack("b", b[:1])[0]))
-        v["u16 LE"].set(f"{int.from_bytes(b[:2], 'little')} (0x{int.from_bytes(b[:2], 'little'):04X})"
-                        if len(b) >= 2 else "-")
-        v["u16 BE"].set(f"{int.from_bytes(b[:2], 'big')} (0x{int.from_bytes(b[:2], 'big'):04X})"
-                        if len(b) >= 2 else "-")
-        v["u32 LE"].set(f"0x{int.from_bytes(b, 'little'):08X}" if len(b) == 4 else "-")
-        v["u32 BE"].set(f"0x{int.from_bytes(b, 'big'):08X}" if len(b) == 4 else "-")
+        if len(b) >= 2:
+            v["u16 LE"].set(f"{int.from_bytes(b[:2], 'little')} (0x{int.from_bytes(b[:2], 'little'):04X})")
+            v["u16 BE"].set(f"{int.from_bytes(b[:2], 'big')} (0x{int.from_bytes(b[:2], 'big'):04X})")
+        if len(b) == 4:
+            v["u32 LE"].set(f"0x{int.from_bytes(b, 'little'):08X}")
+            v["u32 BE"].set(f"0x{int.from_bytes(b, 'big'):08X}")
         v["2진수"].set(f"{b[0]:08b}")
         v["문자"].set(repr(chr(b[0])) if 32 <= b[0] < 127 else "-")
+
+    # --- 고장 디스크 ---
+    def goto_next_bad(self):
+        if not self.src:
+            return
+        nxt = self.src.bad.next_after(self.cursor)
+        if nxt is None:
+            first = self.src.bad.next_after(-1)
+            if first is None:
+                self.status.set("알려진 읽기 실패 위치가 없습니다 (아직 읽어 본 곳에서는)")
+                return
+            nxt = first
+        self.move_to(nxt)
+
+    def run_bg(self, func, done, title: str = "작업", failed=None):
+        """func 를 백그라운드에서 실행하고 끝나면 done(결과) 를 화면 스레드에서 호출."""
+        box: dict = {}
+
+        def work():
+            try:
+                box["result"] = func()
+            except Exception as e:
+                box["error"] = e
+        th = threading.Thread(target=work, daemon=True)
+        th.start()
+
+        def poll():
+            if th.is_alive():
+                self.root.after(80, poll)
+            elif "error" in box:
+                messagebox.showerror(title, f"{box['error']}{access_hint(box['error'])}")
+                if failed:
+                    failed()
+            else:
+                done(box["result"])
+        poll()
+
+    def cmd_health(self, path: str | None = None):
+        if path is None:
+            default = self.src.path if self.src and self.src.is_device else ""
+            path = simpledialog.askstring(
+                "드라이브 상태", "장치 경로 (예: /dev/sda, /dev/nvme0n1, \\\\.\\PhysicalDrive2)",
+                initialvalue=default, parent=self.root)
+        if not path:
+            return
+        self.status.set(f"{path} 상태 읽는 중…")
+        self.run_bg(lambda: format_health(read_health(path), path),
+                    lambda text: self.show_text("드라이브 상태", text), "드라이브 상태")
+
+    def cmd_layout(self):
+        if not self.src:
+            messagebox.showinfo("구조 탐색", "먼저 디스크나 이미지를 여세요.")
+            return
+        LayoutWindow(self)
 
 
 class AnalysisWindow:
@@ -1939,6 +2879,284 @@ class AnalysisWindow:
         self.refresh()
 
 
+class LayoutWindow:
+    """파티션 테이블·파일시스템·읽기 실패 구간·시그니처 스캔 결과를 트리로 보여주고, 더블클릭하면 이동."""
+
+    KIND_TAGS = {"warn": "warn", "bad": "bad"}
+
+    def __init__(self, app: HexEditorApp):
+        self.app = app
+        self.src = app.src
+        self.win = tk.Toplevel(app.root)
+        self.win.title(f"구조 탐색 — {self.src.path}")
+        self.win.geometry("1050x560")
+        btns = ttk.Frame(self.win, padding=6)
+        btns.pack(side="top", fill="x")
+        ttk.Button(btns, text="선택 위치로 이동", command=self.jump).pack(side="left")
+        ttk.Button(btns, text="새로 고침", command=self.refresh).pack(side="left", padx=4)
+        ttk.Button(btns, text="시그니처 스캔…", command=self.start_scan).pack(side="left", padx=(12, 0))
+        ttk.Button(btns, text="스캔 중지", command=lambda: self.stop.set()).pack(side="left", padx=4)
+        self.info = tk.StringVar()
+        ttk.Label(btns, textvariable=self.info).pack(side="left", padx=12)
+        frame = ttk.Frame(self.win)
+        frame.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.tree = ttk.Treeview(frame, columns=("offset", "size", "detail"), show="tree headings")
+        self.tree.heading("#0", text="항목")
+        self.tree.column("#0", width=330)
+        for col, label, width in (("offset", "오프셋", 150), ("size", "크기", 100), ("detail", "설명", 450)):
+            self.tree.heading(col, text=label)
+            self.tree.column(col, width=width, stretch=(col == "detail"))
+        self.tree.tag_configure("warn", foreground="#e65100")
+        self.tree.tag_configure("bad", foreground="#b71c1c")
+        sb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self.tree.bind("<Double-1>", lambda e: self.jump())
+        self.offsets: dict[str, int] = {}
+        self.stop = threading.Event()
+        self.scanning = False
+        self.win.protocol("WM_DELETE_WINDOW", self.close)
+        self.refresh()
+
+    def alive(self) -> bool:
+        try:
+            return bool(self.win.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def close(self):
+        self.stop.set()
+        self.win.destroy()
+
+    def _insert(self, parent, label, off, length=0, detail="", tag=""):
+        iid = self.tree.insert(parent, "end", text=label, open=True, tags=(tag,) if tag else (),
+                               values=(f"0x{off:X}", human_size(length) if length else "", detail))
+        self.offsets[iid] = off
+        return iid
+
+    def refresh(self):
+        self.info.set("구조 읽는 중… (불량 섹터가 있으면 오래 걸릴 수 있음)")
+        src = self.src
+        self.app.run_bg(lambda: parse_layout(src), self._show, "구조 탐색")
+
+    def _show(self, items):
+        if not self.alive():
+            return
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+        self.offsets.clear()
+        bad_root = None
+        for it in items:
+            if it["kind"] == "bad":
+                if bad_root is None:
+                    bad_root = self._insert("", "읽기 실패 구간", it["offset"], tag="bad")
+                self._insert(bad_root, it["label"], it["offset"], it["length"], it["detail"], "bad")
+            else:
+                self._insert("", it["label"], it["offset"], it["length"], it["detail"],
+                             self.KIND_TAGS.get(it["kind"], ""))
+        if bad_root is not None:
+            n_bad = len(self.tree.get_children(bad_root))
+            self.tree.item(bad_root, text=f"읽기 실패 구간 ({n_bad}개" + (", 앞 200개만" if n_bad >= 200 else "") + ")")
+        warns = sum(1 for it in items if it["kind"] == "warn")
+        self.info.set(f"{len(items)}개 항목" + (f", 경고 {warns}개" if warns else "")
+                      + " — 더블클릭하면 그 위치로 이동")
+
+    def jump(self):
+        sel = self.tree.selection()
+        if sel and sel[0] in self.offsets:
+            if self.app.src is not self.src:
+                messagebox.showinfo("이동", "편집기에서 다른 파일이 열려 있습니다.", parent=self.win)
+                return
+            self.app.move_to(self.offsets[sel[0]])
+
+    def start_scan(self):
+        if self.scanning:
+            return
+        default_len = "1G" if self.src.size > (1 << 30) else ""
+        rng = simpledialog.askstring(
+            "시그니처 스캔", "시작 오프셋, 길이 (길이를 비우면 끝까지)\n"
+                          "섹터 경계마다 파티션 부트 섹터·사진·문서 시작을 찾습니다. 1GB 에 수십 초 정도 걸립니다.",
+            initialvalue=f"0x{self.app.cursor - self.app.cursor % 512:X}, {default_len}", parent=self.win)
+        if not rng:
+            return
+        try:
+            off_s, _, len_s = rng.partition(",")
+            start = parse_int(off_s)
+            length = parse_size(len_s) if len_s.strip() else None
+        except ValueError:
+            messagebox.showerror("시그니처 스캔", "형식: 오프셋, 길이 (예: 0, 10G)", parent=self.win)
+            return
+        self.stop.clear()
+        self.scanning = True
+        root = self._insert("", f"시그니처 스캔 (0x{start:X} 부터)", start)
+        prog = {"done": 0, "total": 1}
+
+        def progress(done, total):
+            prog.update(done=done, total=total)
+
+        def tick():
+            if self.scanning and self.alive():
+                self.info.set(f"스캔 중 {human_size(prog['done'])} / {human_size(prog['total'])}")
+                self.win.after(250, tick)
+
+        def done(hits):
+            self.scanning = False
+            if not self.alive():
+                return
+            for off, name in hits:
+                self._insert(root, name, off)
+            self.tree.item(root, text=f"시그니처 스캔 (0x{start:X} 부터) — {len(hits)}개"
+                                      + (" (중지됨)" if self.stop.is_set() else ""))
+            self.info.set(f"스캔 완료: {len(hits)}개 발견" + (" (중지됨)" if self.stop.is_set() else ""))
+
+        src = self.src
+        self.app.run_bg(lambda: scan_signatures(src, start, length, 512, progress, self.stop.is_set), done,
+                        "시그니처 스캔", failed=lambda: setattr(self, "scanning", False))
+        tick()
+
+
+class RescueWindow:
+    """불량 섹터를 건너뛰며 디스크를 이미지 파일로 복사 (ddrescue 방식, 이어하기 지원)."""
+
+    def __init__(self, app: HexEditorApp):
+        self.app = app
+        self.win = tk.Toplevel(app.root)
+        self.win.title("복구 이미지 만들기")
+        self.win.resizable(True, False)
+        frm = ttk.Frame(self.win, padding=10)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+        default_src = app.src.path if app.src and app.src.is_device else ""
+        self.vars = {}
+        rows = (("src", "원본 디스크", default_src), ("out", "저장할 이미지", ""), ("offset", "시작 오프셋", "0"),
+                ("length", "길이 (비우면 끝까지)", ""), ("size", "용량 직접 지정 (인식 안 될 때)", ""),
+                ("retries", "실패 섹터 재시도 횟수", "2"))
+        for r, (key, label, value) in enumerate(rows):
+            ttk.Label(frm, text=label).grid(row=r, column=0, sticky="w", pady=2)
+            var = tk.StringVar(value=value)
+            ttk.Entry(frm, textvariable=var, width=60).grid(row=r, column=1, sticky="we", padx=6)
+            self.vars[key] = var
+        ttk.Button(frm, text="찾아보기…", command=self.browse).grid(row=1, column=2)
+        ttk.Label(frm, foreground="#666",
+                  text="예: /dev/sda, /dev/nvme0n1, \\\\.\\PhysicalDrive2   (장치 검색 창에서 경로 확인)\n"
+                       "이미지 파일에는 SSD 용량만큼의 빈 공간이 필요합니다. 같은 이미지로 다시 시작하면 이어서 진행합니다."
+                  ).grid(row=len(rows), column=0, columnspan=3, sticky="w", pady=(4, 8))
+        self.bar = ttk.Progressbar(frm, maximum=1000)
+        self.bar.grid(row=len(rows) + 1, column=0, columnspan=3, sticky="we")
+        self.status = tk.StringVar(value="대기 중")
+        ttk.Label(frm, textvariable=self.status, justify="left").grid(row=len(rows) + 2, column=0, columnspan=3,
+                                                                     sticky="w", pady=6)
+        btns = ttk.Frame(frm)
+        btns.grid(row=len(rows) + 3, column=0, columnspan=3, sticky="e")
+        self.start_btn = ttk.Button(btns, text="시작 / 이어하기", command=self.start)
+        self.start_btn.pack(side="left")
+        ttk.Button(btns, text="중지", command=lambda: self.stop.set()).pack(side="left", padx=4)
+        self.open_btn = ttk.Button(btns, text="이미지 열기", command=self.open_image, state="disabled")
+        self.open_btn.pack(side="left")
+        self.stop = threading.Event()
+        self.running = False
+        self.prog: dict = {}
+        self.out = ""
+        self.win.protocol("WM_DELETE_WINDOW", self.close)
+
+    def close(self):
+        if self.running:
+            if not messagebox.askyesno("복구 이미지", "진행 중입니다. 중지하고 닫을까요?\n(나중에 이어서 할 수 있습니다)",
+                                       parent=self.win):
+                return
+            self.stop.set()
+        self.win.destroy()
+
+    def browse(self):
+        out = filedialog.asksaveasfilename(parent=self.win, title="복구 이미지 저장 위치", defaultextension=".img",
+                                           filetypes=[("디스크 이미지", "*.img"), ("모든 파일", "*.*")],
+                                           confirmoverwrite=False)
+        if out:
+            self.vars["out"].set(out)
+
+    def start(self):
+        if self.running:
+            return
+        path = normalize_device_path(self.vars["src"].get().strip())
+        out = self.vars["out"].get().strip()
+        if not path or not out:
+            messagebox.showerror("복구 이미지", "원본과 저장할 이미지를 입력하세요.", parent=self.win)
+            return
+        if os.path.abspath(out) == os.path.abspath(path):
+            messagebox.showerror("복구 이미지", "원본과 같은 곳에 저장할 수 없습니다.", parent=self.win)
+            return
+        try:
+            size = parse_size(self.vars["size"].get()) if self.vars["size"].get().strip() else None
+            offset = parse_int(self.vars["offset"].get() or "0")
+            length = parse_size(self.vars["length"].get()) if self.vars["length"].get().strip() else None
+            retries = int(self.vars["retries"].get() or "2")
+            src = ByteSource(path, size=size)
+        except (ValueError, OSError) as e:
+            messagebox.showerror("복구 이미지", f"{e}{access_hint(e) if isinstance(e, OSError) else ''}",
+                                 parent=self.win)
+            return
+        if src.size == 0:
+            src.close()
+            messagebox.showerror("복구 이미지", "용량이 0 으로 보입니다. '용량 직접 지정' 에 SSD 용량을 입력하세요.",
+                                 parent=self.win)
+            return
+        resume = os.path.exists(rescue_map_path(out)) and os.path.exists(out)
+        self.out, self.running, self.prog = out, True, {}
+        self.stop.clear()
+        self.start_btn.configure(state="disabled")
+        self.open_btn.configure(state="disabled")
+        self.status.set("이어서 진행합니다…" if resume else "시작합니다…")
+
+        def progress(p):
+            self.prog = p
+
+        def work():
+            try:
+                return rescue_image(src, out, offset, length, retries=retries, progress=progress,
+                                    should_stop=self.stop.is_set)
+            finally:
+                src.close()
+
+        def failed():
+            self.running = False
+            self.start_btn.configure(state="normal")
+
+        self.app.run_bg(work, self.done, "복구 이미지", failed)
+        self.tick()
+
+    def tick(self):
+        if not self.running:
+            return
+        try:
+            if not self.win.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        p = self.prog
+        if p:
+            self.bar["value"] = 1000 * p["done"] / max(p["total"], 1)
+            phase = ("1단계: 읽히는 곳 빠르게 복사" if p["phase"] == 1 else
+                     f"2단계: 실패 구간 섹터 단위 재시도 (남은 {human_size(p['pending'])})")
+            self.status.set(f"{phase}\n{human_size(p['done'])} / {human_size(p['total'])}   "
+                            f"건너뜀 {human_size(p['pending'])}   불량 확정 {human_size(p['bad'])}")
+        self.win.after(300, self.tick)
+
+    def done(self, res):
+        self.running = False
+        try:
+            self.status.set(format_rescue(res))
+            self.bar["value"] = 1000 * res["copied"] / max(res["total"], 1)
+            self.start_btn.configure(state="normal")
+            self.open_btn.configure(state="normal")
+        except tk.TclError:
+            pass
+
+    def open_image(self):
+        if self.out:
+            self.app.open_path(self.out)
+
+
 class DeviceScanWindow:
     def __init__(self, app: HexEditorApp):
         self.app = app
@@ -1949,7 +3167,8 @@ class DeviceScanWindow:
         btns.pack(side="top", fill="x")
         ttk.Button(btns, text="새로 고침", command=self.refresh).pack(side="left")
         ttk.Button(btns, text="선택한 디스크 열기", command=self.open_selected).pack(side="left", padx=4)
-        ttk.Button(btns, text="텍스트로 보기", command=self.as_text).pack(side="left")
+        ttk.Button(btns, text="SMART 상태", command=self.health_selected).pack(side="left")
+        ttk.Button(btns, text="텍스트로 보기", command=self.as_text).pack(side="left", padx=4)
         self.info = tk.StringVar()
         ttk.Label(btns, textvariable=self.info).pack(side="left", padx=12)
         cols = (("kind", "종류", 90), ("path", "경로", 220), ("name", "이름", 230),
@@ -1994,24 +3213,33 @@ class DeviceScanWindow:
                           " — USB 케이스를 연결했는지 확인하세요"))
         poll()
 
-    def open_selected(self):
+    def _selected_disk(self) -> str | None:
         sel = self.tree.selection()
         if not sel:
-            return
+            return None
         it = self.items[int(sel[0])]
         path = it.get("path", "").split(",")[0].strip()
         if it["kind"] == "usb" and not path.startswith(("/dev/", "\\\\.\\")):
-            messagebox.showinfo("열기", "USB 브릿지 항목은 디스크 경로가 아닙니다.\n"
+            messagebox.showinfo("장치", "USB 브릿지 항목은 디스크 경로가 아닙니다.\n"
                                         "같은 크기의 '디스크' 항목을 선택하세요.", parent=self.win)
-            return
+            return None
+        return path or None
+
+    def open_selected(self):
+        path = self._selected_disk()
         if path:
             self.app.cmd_open_device(path)
+
+    def health_selected(self):
+        path = self._selected_disk()
+        if path:
+            self.app.cmd_health(path)
 
     def as_text(self):
         self.app.show_text("장치 검색 결과", format_scan(self.items))
 
 
-def run_gui(initial_path: str | None = None) -> int:
+def run_gui(initial_path: str | None = None, initial_size: int | None = None) -> int:
     if tk is None:
         print("tkinter 가 없어 GUI를 열 수 없습니다.\n"
               "  Debian/Ubuntu/Raspberry Pi OS: sudo apt install python3-tk\n"
@@ -2028,7 +3256,7 @@ def run_gui(initial_path: str | None = None) -> int:
         ttk.Style(root).theme_use("vista" if IS_WINDOWS else "clam")
     except tk.TclError:
         pass
-    HexEditorApp(root, initial_path)
+    HexEditorApp(root, initial_path, initial_size)
     root.mainloop()
     return 0
 

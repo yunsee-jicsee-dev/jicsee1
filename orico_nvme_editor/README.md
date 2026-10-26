@@ -26,6 +26,10 @@ ORICO 케이스는 모델과 생산 시기에 따라 **Realtek RTL9210/RTL9210B*
 | 장치 검색 | 연결된 USB 브릿지의 VID:PID, REV(대부분 브릿지 펌웨어 버전), NVMe SSD 펌웨어 버전 표시 |
 | 파일 비교 | ORICO 원본 펌웨어와 다른 펌웨어의 차이 구간 및 USB ID 비교 |
 | 이미지 덤프 | 디스크 일부/전체를 파일로 백업 |
+| **고장 디스크 탐색** | 읽기 실패 섹터는 `??` 로 표시하고 건너뜀, 용량 0 으로 보이는 디스크도 크기를 지정해 열기 |
+| **복구 이미지** | ddrescue 방식(빠른 복사 → 실패 구간만 섹터 재시도), 중단 후 이어하기 |
+| **구조 탐색** | MBR/GPT(주·백업 헤더 CRC), 파티션별 파일시스템, 시그니처 스캔(부트 섹터·사진·문서) |
+| **드라이브 상태** | SMART/NVMe 상태와 판정 — USB 케이스 안의 NVMe 도 smartctl 로 읽기 |
 | 안전장치 | 저장 시 자동 백업(`.bak`), 디스크는 기본 읽기 전용, 쓰기 시 경로 재입력 확인 |
 
 ## 다운로드 / 실행
@@ -99,6 +103,36 @@ sudo nvme_hexedit dump /dev/nvme0n1 --length 0x200
 nvme_hexedit image PhysicalDrive2 head.bin --length 0x100000
 ```
 
+## 고장 난 NVMe(SSD) 탐색하기
+
+GUI에서는 **고장 디스크** 메뉴에 모두 들어 있습니다 (`고장 디스크 대처 순서` 에 같은 내용이 있습니다).
+
+1. **케이스부터 의심하기** — 다른 포트·케이블·케이스(또는 메인보드 M.2)로 확인. ORICO 케이스의 인식 끊김·용량 0·
+   속도 저하는 SSD 가 아니라 브릿지 칩/전원 문제인 경우가 많습니다.
+2. **상태 확인** — `nvme_hexedit health /dev/sda` (Windows: `health PhysicalDrive2`)
+   - USB 케이스 안의 NVMe 는 [smartmontools](https://www.smartmontools.org) 가 필요합니다. Realtek/JMicron/ASMedia
+     브릿지는 `-d sntrealtek / sntjmicron / sntasmedia` 방식을 자동으로 시도합니다.
+   - 미디어 오류·치명 경고·"읽기 전용 모드"가 보이면 SSD 자체 고장입니다.
+3. **복구 이미지 먼저** — 고장 디스크는 읽을수록 나빠질 수 있으니 한 번에 이미지로 떠 두고 이미지를 탐색하세요.
+   ```bash
+   sudo nvme_hexedit rescue /dev/sda broken.img          # Ctrl+C 로 멈추고, 같은 명령으로 이어하기
+   nvme_hexedit rescue PhysicalDrive2 D:\broken.img       # Windows (관리자)
+   nvme_hexedit rescue /dev/sda broken.img --size 512G    # 용량을 0 으로 알려주는 디스크
+   ```
+   - 1단계: 64KiB 단위로 빠르게 복사, 실패한 블록은 건너뜀 → 2단계: 건너뛴 곳만 섹터 단위로 재시도
+   - 진행 기록 `broken.img.rescue.json` 이 같이 만들어지고, 이미지를 열면 못 읽은 곳이 `??` 로 표시됩니다.
+4. **구조 탐색**
+   ```bash
+   nvme_hexedit layout broken.img                 # 파티션 테이블, GPT CRC, 백업 GPT, 파일시스템
+   nvme_hexedit sigscan broken.img --length 20G   # 부트 섹터·ext 슈퍼블록·JPEG/PNG/PDF/ZIP/MP4 위치
+   nvme_hexedit dump broken.img --offset 0x100000 # 특정 위치 보기 (읽기 실패는 ??)
+   ```
+   GUI에서는 결과 목록을 더블클릭하면 그 위치로 이동하고, `Ctrl+B` 로 다음 읽기 실패 위치로 갑니다.
+5. **실제 파일 복구**는 만든 이미지에 TestDisk/PhotoRec, DMDE 같은 전용 도구를 쓰는 것이 안전합니다.
+
+> 디스크를 직접 열어 볼 때도 화면은 멈추지 않습니다(백그라운드에서 읽음). 다만 불량 섹터 하나를 읽는 데
+> OS가 수십 초씩 재시도할 수 있으니, 많이 돌아다닐 예정이면 이미지를 먼저 만드는 편이 빠르고 안전합니다.
+
 ## 한계와 주의 사항
 
 - **칩 추정은 휴리스틱입니다.** 펌웨어 안의 문자열과 USB 디스크립터 패턴으로 추정하므로,
@@ -107,6 +141,8 @@ nvme_hexedit image PhysicalDrive2 head.bin --length 0x100000
   서명이 있는 펌웨어는 수정하면 MP 툴이 거부할 수 있습니다. sum8 방식은 우연히 맞을 확률(1/256)이 있습니다.
 - **디스크 쓰기는 위험합니다.** 기본은 읽기 전용이며, 쓰기 전에 바뀌는 블록의 원본을
   `~/orico-nvme-backups/<시각>/` 에 저장합니다. Windows는 마운트된 볼륨 영역에 대한 직접 쓰기를 막습니다.
+- **고장 디스크 탐색은 "보는" 도구입니다.** 파일시스템을 해석해 파일을 꺼내 주지는 않습니다.
+  읽기 실패 섹터가 있는 블록에는 디스크 쓰기를 거부합니다(원본을 백업할 수 없으므로).
 - 브릿지 칩과 맞지 않는 펌웨어를 플래시하면 케이스가 인식되지 않을 수 있습니다.
   대부분 MP 툴의 복구 모드로 살릴 수 있지만, 책임은 사용자에게 있습니다.
 
