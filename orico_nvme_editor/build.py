@@ -30,6 +30,9 @@ def target_name() -> str:
 
 def main() -> int:
     here = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, here)
+    from nvme_hexedit import _fix_stdio
+    _fix_stdio()  # Windows CI 처럼 출력이 cp1252 이어도 한글 메시지에서 죽지 않게
     try:
         import tkinter  # noqa: F401
     except ImportError:
