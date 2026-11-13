@@ -344,12 +344,30 @@ def analyze_firmware(data: bytes, original: bytes | None = None) -> dict:
         "checksum_schemes": schemes,
         "checksum_valid_now": {s: checksum_matches(data, s) for s in schemes},
         "strings": find_interesting_strings(data),
+        "disk_hint": disk_hint(data),
     }
+
+
+def disk_hint(data: bytes) -> str:
+    """펌웨어가 아니라 디스크/디스크 이미지를 분석한 것 같으면 그 이유."""
+    if len(data) >= 1024 and data[512:520] == b"EFI PART":
+        return "GPT 파티션 테이블이 있습니다"
+    if data[3:11] in (b"NTFS    ", b"EXFAT   ") or data[82:90] == b"FAT32   ":
+        return "파일시스템 부트 섹터로 시작합니다"
+    if len(data) >= 512 and data[510:512] == b"\x55\xaa" and any(data[446 + 16 * i + 4] for i in range(4)):
+        return "MBR 파티션 테이블이 있습니다"
+    if b"F\x00I\x00L\x00E\x00" in data[:8 << 20] or b"$\x00M\x00F\x00T\x00" in data[:8 << 20]:
+        return "NTFS 파일 기록($MFT)이 있습니다"
+    return ""
 
 
 def format_report(rep: dict, name: str = "") -> str:
     L = []
     L.append(f"=== 펌웨어 분석 {name} ===")
+    if rep.get("disk_hint"):
+        L.append(f"※ 이건 펌웨어 파일이 아니라 디스크(또는 디스크 이미지)로 보입니다: {rep['disk_hint']}.")
+        L.append("  디스크 내용은 '구조 탐색'(CLI: layout) 으로 보세요. 아래 칩/USB 항목은 의미가 없습니다.")
+        L.append("")
     L.append(f"크기     : {human_size(rep['size'])} ({rep['size']} 바이트)")
     L.append(f"MD5      : {rep['md5']}")
     L.append(f"SHA-256  : {rep['sha256']}")

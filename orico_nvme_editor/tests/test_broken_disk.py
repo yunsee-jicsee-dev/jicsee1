@@ -261,6 +261,14 @@ class LayoutTests(TmpDir):
         src.close()
 
 
+class DiskHintTests(unittest.TestCase):
+    def test_firmware_analysis_warns_on_disks(self):
+        self.assertIn("GPT", nh.disk_hint(bytes(make_gpt_disk())))
+        self.assertIn("부트 섹터", nh.disk_hint(ntfs_boot()))
+        self.assertIn("펌웨어 파일이 아니라 디스크", nh.format_report(nh.analyze_firmware(bytes(make_gpt_disk()))))
+        self.assertEqual(nh.disk_hint(bytes(range(256)) * 64), "")
+
+
 class SignatureScanTests(TmpDir):
     def test_finds_aligned_signatures_only(self):
         old = nh.CHUNK
