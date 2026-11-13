@@ -1348,6 +1348,11 @@ def format_scan(items: list[dict]) -> str:
             L.append(f"    REV(bcdDevice): {it['firmware']}  ← 대부분 브릿지 펌웨어 버전")
             L.append(f"    드라이버  : {it.get('driver', '')}"
                      + (f"   속도: {it['speed']}" if it.get("speed") else ""))
+            if (int(it["vid"], 16), int(it["pid"], 16)) in KNOWN_BRIDGES and \
+                    it.get("driver", "").lower() in ("usbstor", "usb-storage"):
+                L.append("    ⚠ UAS 아님 : NVMe 케이스가 느린 호환 모드로 붙었습니다. USB 2.0 포트(전원 500mA 한계)이거나")
+                L.append("                케이블이 USB 2.0 용일 수 있습니다. NVMe SSD 는 전원이 모자라 인식이 안 될 수 있으니")
+                L.append("                파란색 USB 3 포트 / USB-C 포트와 케이스 동봉 케이블을 쓰세요.")
             if it.get("error"):
                 L.append(f"    장치 오류 : 코드 {it['error']} (장치 관리자에 느낌표로 표시됨)")
             if it.get("path"):

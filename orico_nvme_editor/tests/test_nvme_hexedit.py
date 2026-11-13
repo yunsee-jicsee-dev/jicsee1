@@ -252,6 +252,18 @@ class WindowsScanTests(unittest.TestCase):
         self.assertIn("알려진 USB-NVMe 브릿지", text)
         self.assertNotIn("인식하지 못한", text)
 
+    def test_nvme_bridge_without_uas_warns(self):
+        def ps(cmd):
+            if "Win32_PnPEntity" in cmd:
+                return [{"DeviceID": "USB\\VID_0BDA&PID_9210\\012345678905", "Name": "USB 대용량 저장 장치",
+                         "Service": "USBSTOR", "HardwareID": ["USB\\VID_0BDA&PID_9210&REV_2001"],
+                         "ConfigManagerErrorCode": 0}]
+            return []
+        with mock.patch.object(nh, "_powershell_json", ps):
+            text = nh.format_scan(nh.scan_windows())
+        self.assertIn("UAS 아님", text)
+        self.assertIn("Realtek RTL9210", text)
+
 
 if __name__ == "__main__":
     unittest.main()
