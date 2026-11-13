@@ -1,0 +1,92 @@
+name: ORICO NVMe 에디터 빌드
+
+on:
+  push:
+    paths:
+      - "orico_nvme_editor/**"
+      - ".github/workflows/orico-nvme-editor.yml"
+    tags:
+      - "orico-nvme-v*"
+  pull_request:
+    paths:
+      - "orico_nvme_editor/**"
+      - ".github/workflows/orico-nvme-editor.yml"
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: orico_nvme_editor
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: windows-x64, os: windows-latest, arch: x64 }
+          - { target: windows-arm64, os: windows-11-arm, arch: arm64 }
+          - { target: linux-x64, os: ubuntu-22.04 }
+          - { target: linux-arm64, os: ubuntu-22.04-arm }
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python 설치 (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.arch }}
+
+      # 리눅스는 tkinter 가 확실히 들어 있는 배포판 Python 을 쓴다 (glibc 2.35 기준 → 대부분 배포판 호환)
+      - name: Python 설치 (Linux)
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk python3-venv
+          python3 -m venv --upgrade-deps "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      - name: 도구 설치
+        run: |
+          python -c "import platform, sys, tkinter; print(sys.version, platform.machine(), 'tk', tkinter.TkVersion)"
+          python -m pip install -r requirements-build.txt
+
+      - name: 테스트
+        run: python -m unittest discover -s tests -v
+
+      - name: 빌드
+        run: python build.py
+
+      - name: 실행 확인
+        shell: bash
+        run: |
+          exe=$(ls dist/orico-nvme-editor-*)
+          "$exe" --version
+          "$exe" checksum nvme_hexedit.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orico-nvme-editor-${{ matrix.target }}
+          path: orico_nvme_editor/dist/orico-nvme-editor-*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/orico-nvme-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
